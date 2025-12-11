@@ -9,10 +9,3 @@ interface ImportMetaEnv {
 interface ImportMeta {
   readonly env: ImportMetaEnv
 }
-
-// Fix for "process is not defined" error during build
-declare const process: {
-  env: {
-    [key: string]: string | undefined
-  }
-}
