@@ -1,0 +1,5 @@
+{
+  "name": "AI Сказки",
+  "description": "Персонализированный генератор детских сказок с использованием Google Gemini API",
+  "requestFramePermissions": []
+}
