@@ -1,17 +1,21 @@
 import { createClient, SupabaseClient, User } from '@supabase/supabase-js';
 import { UserTier, UserProfile } from '../types';
 
-// Safe initialization
-// Using process.env instead of import.meta.env to fix runtime error
-const supabaseUrl = process.env.VITE_SUPABASE_URL;
-const supabaseKey = process.env.VITE_SUPABASE_ANON_KEY;
+// Robust initialization: Check both import.meta.env (Vite standard) and process.env (legacy/shim)
+const getEnvVar = (key: string) => {
+  // @ts-ignore
+  return import.meta.env[key] || process.env[key] || process.env[key.replace('VITE_', '')];
+};
+
+const supabaseUrl = getEnvVar('VITE_SUPABASE_URL');
+const supabaseKey = getEnvVar('VITE_SUPABASE_ANON_KEY');
 
 let supabase: SupabaseClient | null = null;
 
 if (supabaseUrl && supabaseKey) {
   supabase = createClient(supabaseUrl, supabaseKey);
 } else {
-  console.warn("Supabase credentials missing. App will run in Guest/Demo mode only.");
+  console.warn("Supabase credentials missing. App will run in Guest/Demo mode only. Check VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY.");
 }
 
 export const getSupabase = () => supabase;
@@ -34,7 +38,6 @@ export const signOut = async () => {
 
 export const getUserProfile = async (user: User): Promise<UserProfile> => {
   if (!supabase) {
-    // Fallback for demo without DB
     return {
       id: user.id,
       email: user.email || '',
@@ -44,8 +47,6 @@ export const getUserProfile = async (user: User): Promise<UserProfile> => {
     };
   }
 
-  // In a real app, we would fetch this from a 'profiles' table
-  // For MVP/Vibe Coding, we simulate based on Auth metadata or return default
   const { data, error } = await supabase
     .from('profiles')
     .select('*')
@@ -53,7 +54,6 @@ export const getUserProfile = async (user: User): Promise<UserProfile> => {
     .single();
 
   if (error || !data) {
-     // Return default free profile if not found
      return {
         id: user.id,
         email: user.email || '',
@@ -66,21 +66,15 @@ export const getUserProfile = async (user: User): Promise<UserProfile> => {
   return data as UserProfile;
 };
 
-// Limit Logic
 export const checkUsageLimit = (profile: UserProfile | null, guestUsageCount: number): boolean => {
   if (!profile) {
-    // Guest: 1 demo
     return guestUsageCount < 1;
   }
-
-  // Free: 1 per week (Simulated by generic count for MVP)
   if (profile.tier === UserTier.FREE) {
      return profile.generationsUsed < 1; 
   }
-  
-  // Premium simulation
-  if (profile.tier === UserTier.STORYTELLER) return profile.generationsUsed < 30; // ~1/day
-  if (profile.tier === UserTier.WIZARD) return profile.generationsUsed < 90; // ~3/day
+  if (profile.tier === UserTier.STORYTELLER) return profile.generationsUsed < 30;
+  if (profile.tier === UserTier.WIZARD) return profile.generationsUsed < 90;
 
   return false;
 };

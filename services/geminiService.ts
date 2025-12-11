@@ -1,11 +1,16 @@
-import { GoogleGenAI, Type, Modality, SchemaType, HarmCategory, HarmBlockThreshold } from "@google/genai";
+import { GoogleGenAI, Type, Modality, HarmCategory, HarmBlockThreshold } from "@google/genai";
 import { StoryRequest, Scenarios, GeneratedStory } from "../types";
 import { GEMINI_MODEL_NAME, SYSTEM_INSTRUCTION } from "../constants";
 
-// Initialize Gemini Client
+// Initialize Gemini Client with robust key checking
 const getAiClient = () => {
-  // Try both naming conventions to be safe on Netlify
-  const apiKey = process.env.API_KEY || process.env.VITE_GEMINI_API_KEY;
+  // Check all possible locations for the key
+  const apiKey = 
+    process.env.API_KEY || 
+    process.env.VITE_GEMINI_API_KEY || 
+    import.meta.env.VITE_GEMINI_API_KEY ||
+    // @ts-ignore
+    import.meta.env.API_KEY; 
   
   if (!apiKey) {
     console.error("CRITICAL: API Key is missing. Check 'API_KEY' or 'VITE_GEMINI_API_KEY' in environment variables.");
@@ -22,7 +27,6 @@ export const generateStoryAI = async (
 ): Promise<Omit<GeneratedStory, 'timestamp' | 'params'>> => {
   const ai = getAiClient();
   
-  // Construct the Prompt
   let promptDetails = `Напиши сказку для ребенка по имени ${request.childName}.`;
   
   if (request.scenario === Scenarios.CUSTOM) {
@@ -49,7 +53,6 @@ export const generateStoryAI = async (
       config: {
         systemInstruction: SYSTEM_INSTRUCTION,
         temperature: 0.9,
-        // Disable safety settings for creative writing (prevents false positives on "conflict" in fairy tales)
         safetySettings: [
           { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
           { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
@@ -78,9 +81,7 @@ export const generateStoryAI = async (
       throw new Error("Empty response from Gemini");
     }
 
-    // Robust JSON extraction
     let jsonString = response.text.trim();
-    // Use regex to find the first '{' and the last '}' to ignore any preamble text
     const jsonMatch = jsonString.match(/\{[\s\S]*\}/);
     if (jsonMatch) {
       jsonString = jsonMatch[0];
@@ -94,7 +95,6 @@ export const generateStoryAI = async (
       throw new Error("AI returned invalid JSON format");
     }
     
-    // Basic validation
     if (!json.title || !json.content) {
       throw new Error("Invalid JSON structure: missing title or content");
     }
@@ -107,7 +107,6 @@ export const generateStoryAI = async (
   } catch (error) {
     console.error(`Gemini API Error (Attempt ${retryCount + 1}):`, error);
     
-    // T2 Requirement: 1 retry on error
     if (retryCount < 1) {
       console.log("Retrying generation...");
       return generateStoryAI(request, retryCount + 1);
@@ -117,9 +116,6 @@ export const generateStoryAI = async (
   }
 };
 
-/**
- * Generates audio for the story using Gemini TTS.
- */
 export const generateStoryAudio = async (text: string, voiceName: string = 'Kore'): Promise<string> => {
   const ai = getAiClient();
   
