@@ -210,8 +210,13 @@ function App() {
       setAppState(AppState.SUCCESS);
 
     } catch (err: any) {
-      console.error(err);
-      setErrorMsg("Магия немного сбилась. Попробуйте еще раз!");
+      console.error("GENERATION FAILED:", err);
+      // Detailed error for user/debugging
+      if (err.message && err.message.includes("API Key is missing")) {
+         setErrorMsg("Ошибка конфигурации: Отсутствует API ключ.");
+      } else {
+         setErrorMsg("Магия немного сбилась. Попробуйте еще раз! (Подробности в консоли)");
+      }
       setAppState(AppState.ERROR);
     }
   };

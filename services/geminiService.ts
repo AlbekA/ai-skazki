@@ -1,13 +1,14 @@
-import { GoogleGenAI, Type } from "@google/genai";
+import { GoogleGenAI, Type, Modality, SchemaType, HarmCategory, HarmBlockThreshold } from "@google/genai";
 import { StoryRequest, Scenarios, GeneratedStory } from "../types";
 import { GEMINI_MODEL_NAME, SYSTEM_INSTRUCTION } from "../constants";
 
 // Initialize Gemini Client
 const getAiClient = () => {
-  // Use process.env.API_KEY as per guidelines
-  const apiKey = process.env.API_KEY;
+  // Try both naming conventions to be safe on Netlify
+  const apiKey = process.env.API_KEY || process.env.VITE_GEMINI_API_KEY;
+  
   if (!apiKey) {
-    console.error("API_KEY is missing in process.env");
+    console.error("CRITICAL: API Key is missing. Check 'API_KEY' or 'VITE_GEMINI_API_KEY' in environment variables.");
   }
   return new GoogleGenAI({ apiKey: apiKey || '' });
 };
@@ -48,6 +49,13 @@ export const generateStoryAI = async (
       config: {
         systemInstruction: SYSTEM_INSTRUCTION,
         temperature: 0.9,
+        // Disable safety settings for creative writing (prevents false positives on "conflict" in fairy tales)
+        safetySettings: [
+          { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+          { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
+          { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_NONE },
+          { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+        ],
         responseMimeType: "application/json",
         responseSchema: {
           type: Type.OBJECT,
@@ -70,20 +78,20 @@ export const generateStoryAI = async (
       throw new Error("Empty response from Gemini");
     }
 
-    // Sanitize JSON (remove markdown code blocks if present)
-    let cleanText = response.text.trim();
-    if (cleanText.startsWith('```json')) {
-      cleanText = cleanText.replace(/^```json\n?/, '').replace(/\n?```$/, '');
-    } else if (cleanText.startsWith('```')) {
-      cleanText = cleanText.replace(/^```\n?/, '').replace(/\n?```$/, '');
+    // Robust JSON extraction
+    let jsonString = response.text.trim();
+    // Use regex to find the first '{' and the last '}' to ignore any preamble text
+    const jsonMatch = jsonString.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      jsonString = jsonMatch[0];
     }
 
     let json;
     try {
-      json = JSON.parse(cleanText);
+      json = JSON.parse(jsonString);
     } catch (e) {
-      console.error("Failed to parse JSON:", cleanText);
-      throw new Error("Invalid JSON format received from AI");
+      console.error("Failed to parse JSON. Raw text:", response.text);
+      throw new Error("AI returned invalid JSON format");
     }
     
     // Basic validation
@@ -120,7 +128,7 @@ export const generateStoryAudio = async (text: string, voiceName: string = 'Kore
       model: "gemini-2.5-flash-preview-tts",
       contents: [{ parts: [{ text: text }] }],
       config: {
-        responseModalities: ['AUDIO'],
+        responseModalities: [Modality.AUDIO],
         speechConfig: {
             voiceConfig: {
               prebuiltVoiceConfig: { voiceName: voiceName },
