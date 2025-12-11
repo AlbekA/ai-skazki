@@ -1,5 +1,4 @@
-// Removed reference to vite/client to fix type definition error
-// /// <reference types="vite/client" />
+/// <reference types="vite/client" />
 
 interface ImportMetaEnv {
   readonly VITE_GEMINI_API_KEY: string
@@ -9,4 +8,11 @@ interface ImportMetaEnv {
 
 interface ImportMeta {
   readonly env: ImportMetaEnv
+}
+
+// Fix for "process is not defined" error during build
+declare const process: {
+  env: {
+    [key: string]: string | undefined
+  }
 }
