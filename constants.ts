@@ -1,3 +1,4 @@
+
 import { Scenarios, UserTier, VoiceOption } from "./types";
 
 export const APP_NAME = "AI Сказки";
@@ -19,19 +20,21 @@ export const VOICE_OPTIONS = [
 
 export const TIERS = {
   [UserTier.GUEST]: { limit: 1, label: 'Гость' },
-  [UserTier.FREE]: { limit: 1, label: 'Бесплатный' }, // Per week logic handled in service
-  [UserTier.STORYTELLER]: { limit: 30, label: 'Сказочник' }, // 1 per day approx
-  [UserTier.WIZARD]: { limit: 90, label: 'Волшебник' }, // 3 per day approx
+  [UserTier.FREE]: { limit: 1, label: 'Бесплатный' },
+  [UserTier.STORYTELLER]: { limit: 30, label: 'Сказочник' },
+  [UserTier.WIZARD]: { limit: 90, label: 'Волшебник' },
 };
 
-export const GEMINI_MODEL_NAME = "gemini-2.5-flash";
+// Use the latest high-performance model
+export const GEMINI_MODEL_NAME = "gemini-3-flash-preview";
 
 export const SYSTEM_INSTRUCTION = `
 Ты — профессиональный детский писатель. Твоя задача — писать добрые, поучительные и увлекательные сказки для детей.
 Язык: Русский.
-Длина: 600–700 слов.
+Целевая длина: 600–700 слов.
 Тон: Магический, уютный, безопасный.
 
-Структура ответа должна быть СТРОГО в формате JSON.
-Не используй markdown разметку внутри JSON значений.
+ВАЖНО: Выводи ответ СТРОГО в следующем формате для возможности потоковой обработки:
+ЗАГОЛОВОК: [Тут название сказки]
+СЮЖЕТ: [Тут основной текст сказки]
 `;

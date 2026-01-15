@@ -1,8 +1,13 @@
+
 import React from 'react';
 
 // Glassmorphism Card
-export const GlassCard: React.FC<{ children: React.ReactNode; className?: string }> = ({ children, className = '' }) => (
-  <div className={`bg-white/10 backdrop-blur-md border border-white/20 rounded-2xl shadow-xl p-6 ${className}`}>
+// Added onClick to props to support interactivity in history lists
+export const GlassCard: React.FC<{ children: React.ReactNode; className?: string; onClick?: () => void }> = ({ children, className = '', onClick }) => (
+  <div 
+    className={`bg-white/10 backdrop-blur-md border border-white/20 rounded-2xl shadow-xl p-6 ${className}`}
+    onClick={onClick}
+  >
     {children}
   </div>
 );

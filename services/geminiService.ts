@@ -1,30 +1,24 @@
-import { GoogleGenAI, Type, Modality, HarmCategory, HarmBlockThreshold } from "@google/genai";
-import { StoryRequest, Scenarios, GeneratedStory } from "../types";
+
+import { GoogleGenAI, Modality } from "@google/genai";
+import { StoryRequest, Scenarios } from "../types";
 import { GEMINI_MODEL_NAME, SYSTEM_INSTRUCTION } from "../constants";
 
-// Initialize Gemini Client with robust key checking
 const getAiClient = () => {
-  // Check all possible locations for the key
-  const apiKey = 
-    process.env.API_KEY || 
-    process.env.VITE_GEMINI_API_KEY || 
-    import.meta.env.VITE_GEMINI_API_KEY ||
-    // @ts-ignore
-    import.meta.env.API_KEY; 
-  
+  const apiKey = process.env.API_KEY;
   if (!apiKey) {
-    console.error("CRITICAL: API Key is missing. Check 'API_KEY' or 'VITE_GEMINI_API_KEY' in environment variables.");
+    console.error("API_KEY is missing in process.env");
   }
   return new GoogleGenAI({ apiKey: apiKey || '' });
 };
 
 /**
- * Generates a story with 1 automatic retry on failure.
+ * Generates a story using streaming for better UX.
+ * @param onChunk Callback for partial updates { title?: string, content?: string }
  */
-export const generateStoryAI = async (
-  request: StoryRequest, 
-  retryCount = 0
-): Promise<Omit<GeneratedStory, 'timestamp' | 'params'>> => {
+export const generateStoryStream = async (
+  request: StoryRequest,
+  onChunk: (data: { title?: string; content?: string; isComplete: boolean }) => void
+): Promise<void> => {
   const ai = getAiClient();
   
   let promptDetails = `Напиши сказку для ребенка по имени ${request.childName}.`;
@@ -41,81 +35,66 @@ export const generateStoryAI = async (
   }
 
   if (request.isInteractive) {
-    promptDetails += " ЭТО ИНТЕРАКТИВНАЯ СКАЗКА. Сказка должна быть построена так, что в конце главный герой обращается к читателю (ребенку) с вопросом, как поступить дальше, или предлагает выбор действия.";
+    promptDetails += " ЭТО ИНТЕРАКТИВНАЯ СКАЗКА. В конце герой должен предложить ребенку выбор.";
   } else {
-    promptDetails += " Сказка должна быть законченной, доброй и учить дружбе.";
+    promptDetails += " Сказка должна быть законченной и доброй.";
   }
 
   try {
-    const response = await ai.models.generateContent({
+    const responseStream = await ai.models.generateContentStream({
       model: GEMINI_MODEL_NAME,
       contents: promptDetails,
       config: {
         systemInstruction: SYSTEM_INSTRUCTION,
-        temperature: 0.9,
-        safetySettings: [
-          { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
-          { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
-          { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_NONE },
-          { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE },
-        ],
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            title: {
-              type: Type.STRING,
-              description: "Заголовок сказки"
-            },
-            content: {
-              type: Type.STRING,
-              description: "Полный текст сказки (600-700 слов)"
-            }
-          },
-          required: ["title", "content"]
-        }
+        temperature: 0.8,
       }
     });
 
-    if (!response.text) {
-      throw new Error("Empty response from Gemini");
+    let fullText = "";
+    let title = "";
+    let content = "";
+
+    for await (const chunk of responseStream) {
+      const chunkText = chunk.text;
+      if (!chunkText) continue;
+
+      fullText += chunkText;
+
+      // Simple streaming parser for the format:
+      // ЗАГОЛОВОК: ...
+      // СЮЖЕТ: ...
+      const titleMatch = fullText.match(/ЗАГОЛОВОК:\s*(.*?)(?:\n|СЮЖЕТ:|$)/s);
+      const contentMatch = fullText.match(/СЮЖЕТ:\s*(.*)/s);
+
+      if (titleMatch && titleMatch[1]) {
+        title = titleMatch[1].trim();
+      }
+      
+      if (contentMatch && contentMatch[1]) {
+        content = contentMatch[1].trim();
+      } else if (!contentMatch && titleMatch && fullText.includes('СЮЖЕТ:')) {
+        // Handle case where СЮЖЕТ: marker is present but text hasn't started yet
+        content = "";
+      }
+
+      onChunk({ 
+        title: title || "Волшебная история...", 
+        content: content, 
+        isComplete: false 
+      });
     }
 
-    let jsonString = response.text.trim();
-    const jsonMatch = jsonString.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
-      jsonString = jsonMatch[0];
-    }
-
-    let json;
-    try {
-      json = JSON.parse(jsonString);
-    } catch (e) {
-      console.error("Failed to parse JSON. Raw text:", response.text);
-      throw new Error("AI returned invalid JSON format");
-    }
-    
-    if (!json.title || !json.content) {
-      throw new Error("Invalid JSON structure: missing title or content");
-    }
-
-    return {
-      title: json.title,
-      content: json.content
-    };
+    onChunk({ title, content, isComplete: true });
 
   } catch (error) {
-    console.error(`Gemini API Error (Attempt ${retryCount + 1}):`, error);
-    
-    if (retryCount < 1) {
-      console.log("Retrying generation...");
-      return generateStoryAI(request, retryCount + 1);
-    }
-    
+    console.error("Gemini Streaming Error:", error);
     throw error;
   }
 };
 
+/**
+ * Generates audio for the story using Gemini TTS.
+ */
 export const generateStoryAudio = async (text: string, voiceName: string = 'Kore'): Promise<string> => {
   const ai = getAiClient();
   
