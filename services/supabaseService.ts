@@ -36,6 +36,7 @@ export const getUserProfile = async (user: User): Promise<UserProfile> => {
     return {
       id: user.id,
       email: user.email || '',
+      displayName: user.email?.split('@')[0] || 'Сказочник',
       tier: UserTier.FREE,
       generationsUsed: 0,
       lastGenerationDate: null
@@ -52,13 +53,31 @@ export const getUserProfile = async (user: User): Promise<UserProfile> => {
      return {
         id: user.id,
         email: user.email || '',
+        displayName: user.email?.split('@')[0] || 'Сказочник',
         tier: UserTier.FREE,
         generationsUsed: 0,
         lastGenerationDate: null
      };
   }
 
-  return data as UserProfile;
+  return {
+    id: data.id,
+    email: data.email,
+    displayName: data.display_name || data.email.split('@')[0],
+    tier: data.tier,
+    generationsUsed: data.generations_used,
+    lastGenerationDate: data.last_generation_date
+  };
+};
+
+export const updateProfileName = async (userId: string, name: string) => {
+  if (!supabase) return;
+  const { error } = await supabase
+    .from('profiles')
+    .update({ display_name: name })
+    .eq('id', userId);
+  
+  if (error) throw error;
 };
 
 /**

@@ -15,6 +15,7 @@ import { checkUsageLimit, getSupabase, getUserProfile, signOut, saveStory, getSt
 import { Button, GlassCard, Input, ScenarioSelector, Spinner, Toggle, VoiceSelector } from './components/UIComponents';
 import StoryModal from './components/StoryModal';
 import AuthModal from './components/AuthModal';
+import ProfileModal from './components/ProfileModal';
 
 function App() {
   const [appState, setAppState] = useState<AppState>(AppState.IDLE);
@@ -31,6 +32,7 @@ function App() {
   const [user, setUser] = useState<UserProfile | null>(null);
   const [guestUsage, setGuestUsage] = useState(0);
   const [showAuthModal, setShowAuthModal] = useState(false);
+  const [showProfileModal, setShowProfileModal] = useState(false);
   const [isAuthInit, setIsAuthInit] = useState(true);
   const [timeToNextUnlock, setTimeToNextUnlock] = useState<string | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
@@ -198,6 +200,19 @@ function App() {
     loadLocalHistory();
   };
 
+  const handleUpdateProfile = (newName: string) => {
+    if (user) {
+      setUser({ ...user, displayName: newName });
+    }
+  };
+
+  const handleSelectStoryFromProfile = (story: GeneratedStory) => {
+    setCurrentStory(story);
+    setShowProfileModal(false);
+    setAppState(AppState.SUCCESS);
+    setIsStreaming(false);
+  };
+
   return (
     <div className="relative min-h-screen font-sans text-white overflow-x-hidden selection:bg-purple-500/30">
       <div className="fixed inset-0 z-0">
@@ -211,17 +226,22 @@ function App() {
           <span className="text-3xl">✨</span>
           <h1 className="text-xl md:text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-purple-200 to-indigo-200">AI Сказки</h1>
         </div>
-        <div className="flex items-center gap-4">
-          <div className="px-3 py-1 rounded-full bg-white/5 border border-white/10 text-xs md:text-sm text-indigo-200">
+        <div className="flex items-center gap-2 md:gap-4">
+          <div className="px-3 py-1 rounded-full bg-white/5 border border-white/10 text-[10px] md:text-xs text-indigo-200">
              {timeToNextUnlock ? (<span>Новая через: <span className="font-bold text-pink-300">{timeToNextUnlock}</span></span>) : (<span>Осталось сказок: <span className="font-bold text-white">{getRemainingGenerations()}</span></span>)}
           </div>
           {!isAuthInit && (user ? (
-            <div className="flex items-center gap-4">
-              <div className="hidden md:block text-right">
-                <p className="text-sm font-medium text-indigo-200">{user.email}</p>
-                <p className="text-xs text-white/50">{TIERS[user.tier].label}</p>
-              </div>
-              <Button variant="secondary" onClick={handleLogout} className="px-4 py-2 text-sm">Выйти</Button>
+            <div className="flex items-center gap-2 md:gap-4">
+              <button 
+                onClick={() => setShowProfileModal(true)}
+                className="flex items-center gap-2 px-3 py-2 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 transition-all text-xs md:text-sm font-medium"
+              >
+                <div className="w-6 h-6 rounded-full bg-indigo-500/30 flex items-center justify-center text-xs">
+                  {user.displayName.charAt(0).toUpperCase()}
+                </div>
+                <span>Мой профиль</span>
+              </button>
+              <Button variant="secondary" onClick={handleLogout} className="px-3 md:px-4 py-2 text-xs md:text-sm">Выйти</Button>
             </div>
           ) : (<Button variant="primary" onClick={() => setShowAuthModal(true)} className="px-4 py-2 text-sm shadow-none">Войти</Button>))}
         </div>
@@ -290,6 +310,7 @@ function App() {
         </div>
       </main>
 
+      {/* Modals */}
       <StoryModal 
         story={currentStory} 
         isOpen={appState === AppState.SUCCESS && !!currentStory} 
@@ -299,6 +320,17 @@ function App() {
         onNewStory={() => { setAppState(AppState.IDLE); window.scrollTo({ top: 0, behavior: 'smooth' }); }}
       />
       <AuthModal isOpen={showAuthModal} onClose={() => setShowAuthModal(false)} onSuccess={() => setErrorMsg(null)} />
+      
+      {user && (
+        <ProfileModal 
+          isOpen={showProfileModal}
+          onClose={() => setShowProfileModal(false)}
+          user={user}
+          stories={storyHistory}
+          onUpdateProfile={handleUpdateProfile}
+          onSelectStory={handleSelectStoryFromProfile}
+        />
+      )}
     </div>
   );
 }

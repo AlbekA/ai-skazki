@@ -53,6 +53,7 @@ export interface GeneratedStory {
 export interface UserProfile {
   id: string;
   email: string;
+  displayName: string; // Added field
   tier: UserTier;
   generationsUsed: number;
   lastGenerationDate: string | null;
