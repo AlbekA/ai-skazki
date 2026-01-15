@@ -20,7 +20,7 @@ export const VOICE_OPTIONS = [
 
 export const TIERS = {
   [UserTier.GUEST]: { limit: 1, label: 'Гость' },
-  [UserTier.FREE]: { limit: 1, label: 'Бесплатный' },
+  [UserTier.FREE]: { limit: 3, label: 'Бесплатный' },
   [UserTier.STORYTELLER]: { limit: 30, label: 'Сказочник' },
   [UserTier.WIZARD]: { limit: 90, label: 'Волшебник' },
 };

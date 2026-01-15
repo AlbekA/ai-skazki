@@ -10,8 +10,8 @@ import {
   VoiceOption
 } from './types';
 import { SCENARIO_OPTIONS, TIERS, VOICE_OPTIONS } from './constants';
-import { generateStoryStream } from './services/geminiService';
-import { checkUsageLimit, getSupabase, getUserProfile, signOut } from './services/supabaseService';
+import { generateStoryStream, generateStoryAudio } from './services/geminiService';
+import { checkUsageLimit, getSupabase, getUserProfile, signOut, saveStory, getStories } from './services/supabaseService';
 import { Button, GlassCard, Input, ScenarioSelector, Spinner, Toggle, VoiceSelector } from './components/UIComponents';
 import StoryModal from './components/StoryModal';
 import AuthModal from './components/AuthModal';
@@ -36,30 +36,56 @@ function App() {
   const [isStreaming, setIsStreaming] = useState(false);
 
   useEffect(() => {
-    const savedHistory = localStorage.getItem('story_history');
-    if (savedHistory) setStoryHistory(JSON.parse(savedHistory));
     const savedGuest = localStorage.getItem('guest_usage');
     if (savedGuest) setGuestUsage(parseInt(savedGuest, 10));
 
     const supabase = getSupabase();
     if (supabase) {
       supabase.auth.getSession().then(({ data: { session } }) => {
-        if (session?.user) getUserProfile(session.user).then(setUser);
+        if (session?.user) {
+          getUserProfile(session.user).then(profile => {
+            setUser(profile);
+            loadUserStories(profile.id);
+          });
+        } else {
+          loadLocalHistory();
+        }
         setIsAuthInit(false);
       });
+      
       const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-        if (session?.user) getUserProfile(session.user).then(setUser);
-        else setUser(null);
+        if (session?.user) {
+          getUserProfile(session.user).then(profile => {
+            setUser(profile);
+            loadUserStories(profile.id);
+          });
+        } else {
+          setUser(null);
+          loadLocalHistory();
+        }
       });
       return () => subscription.unsubscribe();
     } else {
+      loadLocalHistory();
       setIsAuthInit(false);
     }
   }, []);
 
+  const loadLocalHistory = () => {
+    const savedHistory = localStorage.getItem('story_history');
+    if (savedHistory) setStoryHistory(JSON.parse(savedHistory));
+  };
+
+  const loadUserStories = async (userId: string) => {
+    const dbStories = await getStories(userId);
+    setStoryHistory(dbStories);
+  };
+
   useEffect(() => {
-    localStorage.setItem('story_history', JSON.stringify(storyHistory));
-  }, [storyHistory]);
+    if (!user) {
+      localStorage.setItem('story_history', JSON.stringify(storyHistory.slice(0, 2)));
+    }
+  }, [storyHistory, user]);
 
   useEffect(() => {
     if (!user || !user.lastGenerationDate) {
@@ -111,7 +137,9 @@ function App() {
 
     try {
       let firstChunkReceived = false;
-      await generateStoryStream(request, ({ title, content, isComplete }) => {
+      let finalStory: GeneratedStory | null = null;
+
+      await generateStoryStream(request, async ({ title, content, isComplete }) => {
         const newStory: GeneratedStory = {
           title: title || "Сочиняем заголовок...",
           content: content || "Начинаем рассказ...",
@@ -123,18 +151,33 @@ function App() {
 
         if (!firstChunkReceived && (title || content)) {
           firstChunkReceived = true;
-          setAppState(AppState.SUCCESS); // Open modal as soon as we have something
+          setAppState(AppState.SUCCESS);
         }
 
         if (isComplete) {
           setIsStreaming(false);
-          setStoryHistory(prev => [newStory, ...prev].slice(0, 2));
-          if (!user) {
+          finalStory = newStory;
+          
+          if (user) {
+            // Registered users: generate and save audio as well
+            const audioData = await generateStoryAudio(newStory.content, newStory.params.voice);
+            const savedDbStory = await saveStory(user.id, newStory, audioData);
+            
+            if (savedDbStory) {
+              const storyWithId = { ...newStory, id: savedDbStory.id, audio_data: audioData };
+              setCurrentStory(storyWithId);
+              setStoryHistory(prev => [storyWithId, ...prev]);
+            }
+            
+            // Refresh profile state
+            const updatedProfile = await getUserProfile({ id: user.id } as any);
+            setUser(updatedProfile);
+          } else {
+            // Guest: only local history
+            setStoryHistory(prev => [newStory, ...prev].slice(0, 2));
             const newUsage = guestUsage + 1;
             setGuestUsage(newUsage);
             localStorage.setItem('guest_usage', newUsage.toString());
-          } else {
-            setUser(prev => prev ? ({ ...prev, generationsUsed: prev.generationsUsed + 1, lastGenerationDate: new Date().toISOString() }) : null);
           }
         }
       });
@@ -152,6 +195,7 @@ function App() {
     setUser(null);
     setIsInteractive(false);
     setSelectedVoice(VoiceOption.KORE);
+    loadLocalHistory();
   };
 
   return (
@@ -169,7 +213,7 @@ function App() {
         </div>
         <div className="flex items-center gap-4">
           <div className="px-3 py-1 rounded-full bg-white/5 border border-white/10 text-xs md:text-sm text-indigo-200">
-             {timeToNextUnlock ? (<span>Новая сказка через: <span className="font-bold text-pink-300">{timeToNextUnlock}</span></span>) : (<span>Осталось сказок: <span className="font-bold text-white">{getRemainingGenerations()}</span></span>)}
+             {timeToNextUnlock ? (<span>Новая через: <span className="font-bold text-pink-300">{timeToNextUnlock}</span></span>) : (<span>Осталось сказок: <span className="font-bold text-white">{getRemainingGenerations()}</span></span>)}
           </div>
           {!isAuthInit && (user ? (
             <div className="flex items-center gap-4">
@@ -187,7 +231,7 @@ function App() {
         <div className="flex flex-col gap-8">
           <div className="text-center space-y-2 mb-4 animate-fade-in">
             <h2 className="text-4xl md:text-5xl font-bold tracking-tight">Создай волшебство</h2>
-            <p className="text-indigo-200 text-lg">Персонализированная сказка за пару секунд — теперь со стримингом!</p>
+            <p className="text-indigo-200 text-lg">Сказка сохранится в профиле на 30 дней!</p>
           </div>
 
           <GlassCard className="animate-fade-in delay-100">
@@ -209,7 +253,7 @@ function App() {
               <div className="grid md:grid-cols-2 gap-6 p-4 bg-indigo-900/10 rounded-xl border border-indigo-500/10">
                 <VoiceSelector options={VOICE_OPTIONS} selected={selectedVoice} onChange={setSelectedVoice} disabled={!isPremiumUnlocked()} />
                 <div className="flex flex-col justify-end">
-                   <Toggle label="Интерактивная (выбор в конце)" checked={isInteractive} onChange={setIsInteractive} disabled={!isPremiumUnlocked()} />
+                   <Toggle label="Интерактивная" checked={isInteractive} onChange={setIsInteractive} disabled={!isPremiumUnlocked()} />
                 </div>
               </div>
               {errorMsg && <div className="p-4 bg-red-500/20 border border-red-500/30 rounded-xl text-center text-red-100 animate-pulse">{errorMsg}</div>}
@@ -223,16 +267,21 @@ function App() {
 
           {storyHistory.length > 0 && (
             <div className="mt-12 animate-fade-in delay-200">
-              <h3 className="text-xl font-semibold mb-4 text-indigo-200 pl-2">Последние истории</h3>
+              <h3 className="text-xl font-semibold mb-4 text-indigo-200 pl-2">Моя библиотека</h3>
               <div className="grid gap-4 md:grid-cols-2">
                 {storyHistory.map((hist, idx) => (
-                  <GlassCard key={idx} className="hover:bg-white/15 transition-colors cursor-pointer group" onClick={() => { setCurrentStory(hist); setAppState(AppState.SUCCESS); setIsStreaming(false); }}>
+                  <GlassCard key={hist.id || idx} className="hover:bg-white/15 transition-colors cursor-pointer group" onClick={() => { setCurrentStory(hist); setAppState(AppState.SUCCESS); setIsStreaming(false); }}>
                     <div className="flex justify-between items-start mb-2">
                       <span className="text-2xl">{SCENARIO_OPTIONS.find(o => o.value === hist.params.scenario)?.icon || '✨'}</span>
                       <span className="text-xs text-indigo-300">{new Date(hist.timestamp).toLocaleDateString()}</span>
                     </div>
                     <h4 className="font-bold text-lg mb-2 group-hover:text-purple-300 transition-colors">{hist.title}</h4>
                     <p className="text-sm text-gray-400 line-clamp-3">{hist.content}</p>
+                    {hist.audio_data && (
+                      <div className="mt-3 flex items-center gap-1 text-[10px] text-indigo-400 font-bold uppercase tracking-wider">
+                         <div className="w-1 h-1 bg-indigo-400 rounded-full animate-pulse" /> Аудио сохранено
+                      </div>
+                    )}
                   </GlassCard>
                 ))}
               </div>
@@ -246,6 +295,7 @@ function App() {
         isOpen={appState === AppState.SUCCESS && !!currentStory} 
         onClose={() => setAppState(AppState.IDLE)}
         isStreaming={isStreaming}
+        userTier={user?.tier}
         onNewStory={() => { setAppState(AppState.IDLE); window.scrollTo({ top: 0, behavior: 'smooth' }); }}
       />
       <AuthModal isOpen={showAuthModal} onClose={() => setShowAuthModal(false)} onSuccess={() => setErrorMsg(null)} />

@@ -1,3 +1,4 @@
+
 // Enums
 export enum Scenarios {
   SPACE = 'Космос 🚀',
@@ -36,14 +37,15 @@ export interface StoryRequest {
   customHero?: string;
   customPlace?: string;
   customEvent?: string;
-  // New features
   voice: VoiceOption;
   isInteractive: boolean;
 }
 
 export interface GeneratedStory {
+  id?: string;
   title: string;
   content: string;
+  audio_data?: string; // Base64 encoded audio
   timestamp: number;
   params: StoryRequest;
 }
@@ -62,11 +64,14 @@ export interface AuthState {
   isLoading: boolean;
 }
 
-// Supabase Database Types (simplified)
+// Supabase Database Types
 export interface DBStory {
   id: string;
   user_id: string;
   title: string;
   content: string;
+  audio_data?: string;
+  params: any;
   created_at: string;
+  expires_at: string;
 }
