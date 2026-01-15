@@ -231,7 +231,7 @@ function App() {
         <div className="flex flex-col gap-8">
           <div className="text-center space-y-2 mb-4 animate-fade-in">
             <h2 className="text-4xl md:text-5xl font-bold tracking-tight">Создай волшебство</h2>
-            <p className="text-indigo-200 text-lg">Сказка сохранится в профиле на 30 дней!</p>
+            <p className="text-indigo-200 text-lg">Личную аудио-сказку с вашим ребенком в главной роли.</p>
           </div>
 
           <GlassCard className="animate-fade-in delay-100">
