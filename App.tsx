@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   AppState, 
   Scenarios, 
@@ -36,34 +36,42 @@ function App() {
   const [isAuthInit, setIsAuthInit] = useState(true);
   const [timeToNextUnlock, setTimeToNextUnlock] = useState<string | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
+  
+  // Ref to track if we've already loaded history to prevent overwriting
+  const hasLoadedHistory = useRef(false);
 
   useEffect(() => {
+    // Initial guest usage load
     const savedGuest = localStorage.getItem('guest_usage');
     if (savedGuest) setGuestUsage(parseInt(savedGuest, 10));
 
     const supabase = getSupabase();
     if (supabase) {
-      supabase.auth.getSession().then(({ data: { session } }) => {
+      // 1. Initial session check
+      supabase.auth.getSession().then(async ({ data: { session } }) => {
         if (session?.user) {
-          getUserProfile(session.user).then(profile => {
-            setUser(profile);
-            loadUserStories(profile.id);
-          });
+          const profile = await getUserProfile(session.user);
+          setUser(profile);
+          await migrateAndLoadStories(profile);
         } else {
           loadLocalHistory();
         }
         setIsAuthInit(false);
       });
       
-      const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      // 2. Auth state change listener
+      const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
         if (session?.user) {
-          getUserProfile(session.user).then(profile => {
-            setUser(profile);
-            loadUserStories(profile.id);
-          });
+          const profile = await getUserProfile(session.user);
+          setUser(profile);
+          await migrateAndLoadStories(profile);
         } else {
           setUser(null);
-          loadLocalHistory();
+          if (event === 'SIGNED_OUT') {
+             setStoryHistory([]);
+             hasLoadedHistory.current = false;
+             loadLocalHistory();
+          }
         }
       });
       return () => subscription.unsubscribe();
@@ -73,21 +81,48 @@ function App() {
     }
   }, []);
 
+  // Helper to migrate stories from guest to user account
+  const migrateAndLoadStories = async (profile: UserProfile) => {
+    const localData = localStorage.getItem('story_history');
+    const dbStories = await getStories(profile.id);
+    
+    if (localData && dbStories.length === 0) {
+      // If user is new and has local stories, migrate them
+      try {
+        const localStories: GeneratedStory[] = JSON.parse(localData);
+        for (const story of localStories) {
+          await saveStory(profile.id, story, story.audio_data);
+        }
+        // Reload after migration
+        const migratedStories = await getStories(profile.id);
+        setStoryHistory(migratedStories);
+        localStorage.removeItem('story_history'); // Clean up
+      } catch (e) {
+        console.error("Migration failed", e);
+        setStoryHistory(dbStories);
+      }
+    } else {
+      setStoryHistory(dbStories);
+    }
+    hasLoadedHistory.current = true;
+  };
+
   const loadLocalHistory = () => {
     const savedHistory = localStorage.getItem('story_history');
-    if (savedHistory) setStoryHistory(JSON.parse(savedHistory));
+    if (savedHistory) {
+      setStoryHistory(JSON.parse(savedHistory));
+    } else {
+      setStoryHistory([]);
+    }
+    hasLoadedHistory.current = true;
   };
 
-  const loadUserStories = async (userId: string) => {
-    const dbStories = await getStories(userId);
-    setStoryHistory(dbStories);
-  };
-
+  // Safe save to local storage (only for guests and only after loading)
   useEffect(() => {
-    if (!user) {
+    if (!isAuthInit && !user && hasLoadedHistory.current) {
       localStorage.setItem('story_history', JSON.stringify(storyHistory.slice(0, 2)));
     }
-  }, [storyHistory, user]);
+  }, [storyHistory, user, isAuthInit]);
 
   useEffect(() => {
     if (!user || !user.lastGenerationDate) {
@@ -100,7 +135,10 @@ function App() {
         return;
       }
       const lastGenTime = new Date(user.lastGenerationDate!).getTime();
-      let cooldownMs = user.tier === UserTier.FREE ? 7 * 24 * 60 * 60 * 1000 : 24 * 60 * 60 * 1000;
+      let cooldownMs = user.tier === UserTier.FREE ? 30 * 24 * 60 * 60 * 1000 : 24 * 60 * 60 * 1000;
+      
+      // If month passed, technically they should have new limit, but we rely on generationsUsed
+      // This is simplified. In real app, increment_generations would reset monthly.
       const diff = lastGenTime + cooldownMs - Date.now();
       if (diff <= 0) { setTimeToNextUnlock(null); return; }
       const days = Math.floor(diff / (1000 * 60 * 60 * 24));
@@ -161,7 +199,6 @@ function App() {
           finalStory = newStory;
           
           if (user) {
-            // Registered users: generate and save audio as well
             const audioData = await generateStoryAudio(newStory.content, newStory.params.voice);
             const savedDbStory = await saveStory(user.id, newStory, audioData);
             
@@ -170,12 +207,9 @@ function App() {
               setCurrentStory(storyWithId);
               setStoryHistory(prev => [storyWithId, ...prev]);
             }
-            
-            // Refresh profile state
             const updatedProfile = await getUserProfile({ id: user.id } as any);
             setUser(updatedProfile);
           } else {
-            // Guest: only local history
             setStoryHistory(prev => [newStory, ...prev].slice(0, 2));
             const newUsage = guestUsage + 1;
             setGuestUsage(newUsage);
