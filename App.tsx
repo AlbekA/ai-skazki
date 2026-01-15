@@ -37,17 +37,17 @@ function App() {
   const [timeToNextUnlock, setTimeToNextUnlock] = useState<string | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
   
-  // Ref to track if we've already loaded history to prevent overwriting
+  // Ref to track if history is loaded to prevent clearing LocalStorage on mount
   const hasLoadedHistory = useRef(false);
 
   useEffect(() => {
-    // Initial guest usage load
+    // 1. Load guest usage
     const savedGuest = localStorage.getItem('guest_usage');
     if (savedGuest) setGuestUsage(parseInt(savedGuest, 10));
 
     const supabase = getSupabase();
     if (supabase) {
-      // 1. Initial session check
+      // 2. Initial Session Check
       supabase.auth.getSession().then(async ({ data: { session } }) => {
         if (session?.user) {
           const profile = await getUserProfile(session.user);
@@ -59,7 +59,7 @@ function App() {
         setIsAuthInit(false);
       });
       
-      // 2. Auth state change listener
+      // 3. Listen for Auth Changes
       const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
         if (session?.user) {
           const profile = await getUserProfile(session.user);
@@ -81,24 +81,23 @@ function App() {
     }
   }, []);
 
-  // Helper to migrate stories from guest to user account
+  // Migration: Transfer local guest stories to user's database profile upon login
   const migrateAndLoadStories = async (profile: UserProfile) => {
     const localData = localStorage.getItem('story_history');
     const dbStories = await getStories(profile.id);
     
+    // Only migrate if the user is new (has no stories in DB) and has local ones
     if (localData && dbStories.length === 0) {
-      // If user is new and has local stories, migrate them
       try {
         const localStories: GeneratedStory[] = JSON.parse(localData);
         for (const story of localStories) {
           await saveStory(profile.id, story, story.audio_data);
         }
-        // Reload after migration
         const migratedStories = await getStories(profile.id);
         setStoryHistory(migratedStories);
-        localStorage.removeItem('story_history'); // Clean up
+        localStorage.removeItem('story_history');
       } catch (e) {
-        console.error("Migration failed", e);
+        console.error("Migration error:", e);
         setStoryHistory(dbStories);
       }
     } else {
@@ -117,7 +116,7 @@ function App() {
     hasLoadedHistory.current = true;
   };
 
-  // Safe save to local storage (only for guests and only after loading)
+  // Safe save: only sync storyHistory to localStorage for guests and ONLY after we know loading is finished
   useEffect(() => {
     if (!isAuthInit && !user && hasLoadedHistory.current) {
       localStorage.setItem('story_history', JSON.stringify(storyHistory.slice(0, 2)));
@@ -135,10 +134,7 @@ function App() {
         return;
       }
       const lastGenTime = new Date(user.lastGenerationDate!).getTime();
-      let cooldownMs = user.tier === UserTier.FREE ? 30 * 24 * 60 * 60 * 1000 : 24 * 60 * 60 * 1000;
-      
-      // If month passed, technically they should have new limit, but we rely on generationsUsed
-      // This is simplified. In real app, increment_generations would reset monthly.
+      let cooldownMs = user.tier === UserTier.FREE ? 7 * 24 * 60 * 60 * 1000 : 24 * 60 * 60 * 1000;
       const diff = lastGenTime + cooldownMs - Date.now();
       if (diff <= 0) { setTimeToNextUnlock(null); return; }
       const days = Math.floor(diff / (1000 * 60 * 60 * 24));
@@ -177,8 +173,6 @@ function App() {
 
     try {
       let firstChunkReceived = false;
-      let finalStory: GeneratedStory | null = null;
-
       await generateStoryStream(request, async ({ title, content, isComplete }) => {
         const newStory: GeneratedStory = {
           title: title || "Сочиняем заголовок...",
@@ -196,12 +190,9 @@ function App() {
 
         if (isComplete) {
           setIsStreaming(false);
-          finalStory = newStory;
-          
           if (user) {
             const audioData = await generateStoryAudio(newStory.content, newStory.params.voice);
             const savedDbStory = await saveStory(user.id, newStory, audioData);
-            
             if (savedDbStory) {
               const storyWithId = { ...newStory, id: savedDbStory.id, audio_data: audioData };
               setCurrentStory(storyWithId);
