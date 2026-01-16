@@ -2,6 +2,7 @@
 import { GeneratedStory, UserTier } from '../types';
 import { Button, GlassCard } from './UIComponents';
 import { generateStoryAudio } from '../services/geminiService';
+import { getAudioFromCache, saveAudioToCache } from '../services/cacheService';
 import React, { useState, useEffect, useRef } from 'react';
 
 interface StoryModalProps {
@@ -59,7 +60,7 @@ const StoryModal: React.FC<StoryModalProps> = ({
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioSourceRef = useRef<AudioBufferSourceNode | null>(null);
   const audioBufferRef = useRef<AudioBuffer | null>(null);
-  const lastProcessedStoryRef = useRef<number | null>(null);
+  const lastProcessedStoryRef = useRef<string | number | null>(null);
 
   useEffect(() => {
     if (isStreaming && contentEndRef.current) {
@@ -76,23 +77,16 @@ const StoryModal: React.FC<StoryModalProps> = ({
     };
   }, []);
 
-  // Синхронизация: если аудио пришло из родительского компонента (App.tsx) в фоне
-  useEffect(() => {
-    if (story?.audio_data && isLoadingAudio && !audioBufferRef.current) {
-      // Если пользователь нажал Play и ждал, а данные пришли в фоне - запускаем
-      handleToggleAudio(); 
-    }
-  }, [story?.audio_data]);
-
   // Сброс состояния при смене сказки
   useEffect(() => {
-    if (story?.timestamp !== lastProcessedStoryRef.current) {
+    const currentId = story?.id || story?.timestamp;
+    if (currentId !== lastProcessedStoryRef.current) {
       stopAudio();
       audioBufferRef.current = null;
-      lastProcessedStoryRef.current = story?.timestamp || null;
+      lastProcessedStoryRef.current = currentId || null;
       setIsLoadingAudio(false);
     }
-  }, [story?.timestamp]);
+  }, [story?.id, story?.timestamp]);
 
   const stopAudio = () => {
     if (audioSourceRef.current) {
@@ -105,12 +99,7 @@ const StoryModal: React.FC<StoryModalProps> = ({
   };
 
   const isAudioDisabled = () => {
-    if (isStreaming || !story) return true;
-    if (userTier === UserTier.GUEST && !story.audio_data && !audioBufferRef.current) {
-      const isHistory = (Date.now() - story.timestamp > 60000);
-      if (isHistory) return true;
-    }
-    return false;
+    return isStreaming || !story;
   };
 
   const handleToggleAudio = async () => {
@@ -130,26 +119,37 @@ const StoryModal: React.FC<StoryModalProps> = ({
         await audioContextRef.current.resume();
       }
 
-      // 1. Используем уже готовый буфер
+      // 1. Используем уже готовый буфер в памяти
       if (audioBufferRef.current) {
         playBuffer(audioBufferRef.current);
         setIsLoadingAudio(false);
         return;
       }
 
-      // 2. Используем base64 из объекта сказки
-      let base64Audio = story?.audio_data;
+      let base64Audio: string | null = story?.audio_data || null;
+      const cacheKey = story?.id || (story ? `temp_${story.timestamp}` : null);
+
+      // 2. Ищем в локальном кэше (IndexedDB), если в памяти нет данных
+      if (!base64Audio && cacheKey) {
+        base64Audio = await getAudioFromCache(cacheKey);
+        if (base64Audio && onAudioLoaded) {
+            onAudioLoaded(base64Audio); // Синхронизируем с родительским состоянием
+        }
+      }
       
-      // 3. Если данных нет вообще (фоновая генерация еще не успела)
+      // 3. Если данных нет нигде — Генерируем (On-demand)
       if (!base64Audio && story && !isStreaming) {
         try {
-          // Пытаемся запустить принудительно, если кнопка нажата
           base64Audio = await generateStoryAudio(story.content, story.params.voice);
-          if (onAudioLoaded && base64Audio) {
+          if (base64Audio && onAudioLoaded) {
             onAudioLoaded(base64Audio);
+            if (cacheKey) {
+               await saveAudioToCache(cacheKey, base64Audio);
+            }
           }
         } catch (err) {
           console.error("TTS generation failed:", err);
+          // Здесь можно добавить фолбек на Web Speech API если лимит Gemini исчерпан
         }
       }
 
@@ -244,7 +244,7 @@ const StoryModal: React.FC<StoryModalProps> = ({
              <div className="flex items-center gap-2 w-full sm:w-auto bg-white/5 rounded-xl p-1 pr-3">
                <button
                  onClick={handleToggleAudio}
-                 disabled={isLoadingAudio || isStreaming || isAudioDisabled()}
+                 disabled={isLoadingAudio || isStreaming}
                  className={`w-10 h-10 flex items-center justify-center rounded-lg transition-all disabled:opacity-30 disabled:cursor-not-allowed
                    ${isPlaying ? 'bg-indigo-500 text-white' : 'bg-indigo-500/20 text-indigo-200 hover:bg-indigo-500/40 hover:text-white'}
                  `}
@@ -276,10 +276,10 @@ const StoryModal: React.FC<StoryModalProps> = ({
                
                <div className="flex flex-col">
                   <span className="text-[10px] uppercase font-bold text-indigo-300/70 tracking-wider">
-                    {isStreaming ? 'Создаем...' : (isLoadingAudio ? 'Подготовка...' : (isPlaying ? 'Играет' : 'Сказка голосом'))}
+                    {isStreaming ? 'Создаем...' : (isLoadingAudio ? 'Магия голоса...' : (isPlaying ? 'Играет' : 'Слушать'))}
                   </span>
-                  {!isAudioReady && !isStreaming && !isLoadingAudio && !isAudioDisabled() && (
-                    <span className="text-[9px] text-pink-400 animate-pulse font-bold uppercase leading-none">Голос готовится...</span>
+                  {isLoadingAudio && (
+                    <span className="text-[9px] text-pink-400 animate-pulse font-bold uppercase leading-none">Готовим звук...</span>
                   )}
                </div>
              </div>

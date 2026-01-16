@@ -10,8 +10,9 @@ import {
   VoiceOption
 } from './types';
 import { SCENARIO_OPTIONS, TIERS, VOICE_OPTIONS } from './constants';
-import { generateStoryStream, generateStoryAudio } from './services/geminiService';
+import { generateStoryStream } from './services/geminiService';
 import { checkUsageLimit, getSupabase, getUserProfile, signOut, saveStory, getStories, updateStoryAudio } from './services/supabaseService';
+import { saveAudioToCache } from './services/cacheService';
 import { Button, GlassCard, Input, ScenarioSelector, Spinner, Toggle, VoiceSelector } from './components/UIComponents';
 import StoryModal from './components/StoryModal';
 import AuthModal from './components/AuthModal';
@@ -121,7 +122,12 @@ function App() {
   const isPremiumUnlocked = () => user?.tier === UserTier.STORYTELLER || user?.tier === UserTier.WIZARD;
   const getRemainingGenerations = () => user ? Math.max(0, TIERS[user.tier].limit - user.generationsUsed) : Math.max(0, 1 - guestUsage);
 
-  const handleAudioGenerated = (audioData: string, timestamp: number, storyId?: string) => {
+  const handleAudioGenerated = async (audioData: string, timestamp: number, storyId?: string) => {
+    // 1. Кэшируем локально (IndexedDB)
+    const cacheKey = storyId || `temp_${timestamp}`;
+    await saveAudioToCache(cacheKey, audioData);
+
+    // 2. Обновляем состояние
     setStoryHistory(prev => prev.map(s => 
       s.timestamp === timestamp ? { ...s, audio_data: audioData, id: storyId || s.id } : s
     ));
@@ -133,6 +139,7 @@ function App() {
       return prev;
     });
 
+    // 3. Синхронизируем с облаком если нужно
     if (user && storyId) {
       updateStoryAudio(storyId, audioData);
     }
@@ -191,37 +198,21 @@ function App() {
           // 1. Update UI instantly
           setStoryHistory(prev => [finalStory, ...prev]);
 
-          // 2. Parallel Background Processing: Save to DB and Generate Audio
-          const savePromise = user ? saveStory(user.id, finalStory) : Promise.resolve(null);
-          const audioPromise = finalStory.content.length > 10 
-            ? generateStoryAudio(finalStory.content, finalStory.params.voice)
-            : Promise.resolve(null);
-
-          Promise.all([savePromise, audioPromise]).then(async ([dbResponse, audioData]) => {
-            const savedId = dbResponse?.id;
-            
-            // If we have audio, update UI immediately
-            if (audioData) {
-              handleAudioGenerated(audioData, startTime, savedId);
-              
-              // If we have both ID and Audio, ensure DB is in sync
-              if (savedId && user) {
-                await updateStoryAudio(savedId, audioData);
+          // 2. Save to DB (только текст, аудио будет позже по запросу)
+          if (user) {
+            saveStory(user.id, finalStory).then(dbResponse => {
+              if (dbResponse?.id) {
+                setStoryHistory(prev => prev.map(s => s.timestamp === startTime ? { ...s, id: dbResponse.id } : s));
+                setCurrentStory(prev => prev && prev.timestamp === startTime ? { ...prev, id: dbResponse.id } : prev);
               }
-            } else if (savedId) {
-              // Just update the ID if no audio yet
-              setStoryHistory(prev => prev.map(s => s.timestamp === startTime ? { ...s, id: savedId } : s));
-            }
-
-            // Refresh profile if generation count changed
-            if (user) {
+              // Refresh profile
               getUserProfile({ id: user.id } as any).then(p => setUser(p));
-            } else {
-              const nextUsage = guestUsage + 1;
-              setGuestUsage(nextUsage);
-              localStorage.setItem('guest_usage', nextUsage.toString());
-            }
-          }).catch(err => console.error("Parallel processing error:", err));
+            });
+          } else {
+            const nextUsage = guestUsage + 1;
+            setGuestUsage(nextUsage);
+            localStorage.setItem('guest_usage', nextUsage.toString());
+          }
         }
       });
     } catch (err: any) {
@@ -334,15 +325,6 @@ function App() {
                     <h4 className="font-bold text-lg mb-2 group-hover:text-purple-300 transition-colors line-clamp-1">{hist.title}</h4>
                     <p className="text-sm text-gray-400 line-clamp-2">{hist.content}</p>
                     <div className="mt-3 flex items-center justify-between">
-                       {hist.audio_data ? (
-                        <div className="flex items-center gap-1 text-[10px] text-indigo-400 font-bold uppercase tracking-wider">
-                           <div className="w-1.5 h-1.5 bg-indigo-400 rounded-full animate-pulse" /> Аудио готово
-                        </div>
-                       ) : (
-                         <div className="flex items-center gap-1 text-[10px] text-pink-400/70 font-bold uppercase tracking-wider animate-pulse">
-                           <div className="w-1.5 h-1.5 bg-pink-400 rounded-full" /> Магия голоса...
-                         </div>
-                       )}
                        <span className="text-[10px] text-indigo-200/50 group-hover:text-indigo-200 font-bold uppercase">Читать →</span>
                     </div>
                   </GlassCard>
