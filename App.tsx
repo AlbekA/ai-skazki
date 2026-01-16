@@ -129,6 +129,23 @@ function App() {
   const isPremiumUnlocked = () => user?.tier === UserTier.STORYTELLER || user?.tier === UserTier.WIZARD;
   const getRemainingGenerations = () => user ? Math.max(0, TIERS[user.tier].limit - user.generationsUsed) : Math.max(0, 1 - guestUsage);
 
+  const handleAudioGenerated = (audioData: string) => {
+    if (!currentStory) return;
+    
+    // Update local history
+    setStoryHistory(prev => prev.map(s => 
+      s.timestamp === currentStory.timestamp ? { ...s, audio_data: audioData } : s
+    ));
+    
+    // Update current story object
+    setCurrentStory(prev => prev ? { ...prev, audio_data: audioData } : null);
+
+    // Save to DB if available
+    if (user && currentStory.id) {
+      updateStoryAudio(currentStory.id, audioData);
+    }
+  };
+
   const handleGenerate = async () => {
     if (!childName.trim()) { setErrorMsg("Пожалуйста, введите имя ребенка"); return; }
     if (!checkUsageLimit(user, guestUsage)) {
@@ -206,7 +223,6 @@ function App() {
 
               // Update audio in DB if user is logged in
               if (user) {
-                // Poll for the ID if Phase 2 is slow
                 const pollInterval = setInterval(async () => {
                   if (savedStoryId) {
                     await updateStoryAudio(savedStoryId, audioData);
@@ -251,7 +267,6 @@ function App() {
           </div>
           
           <div className="flex items-center gap-2 md:gap-3 flex-nowrap min-w-[120px] justify-end">
-            {/* Show user buttons if we have cached user, otherwise wait for init */}
             {user ? (
               <>
                 <button 
@@ -312,7 +327,6 @@ function App() {
             </div>
           </GlassCard>
 
-          {/* Library shows stories from cache instantly */}
           {storyHistory.length > 0 && (
             <div className="mt-12 animate-fade-in delay-200">
               <h3 className="text-xl font-semibold mb-4 text-indigo-200 pl-2 flex items-center gap-2">
@@ -355,6 +369,7 @@ function App() {
         isOpen={appState === AppState.SUCCESS && !!currentStory} 
         onClose={() => setAppState(AppState.IDLE)}
         isStreaming={isStreaming}
+        onAudioLoaded={handleAudioGenerated}
         userTier={user?.tier}
         onNewStory={() => { setAppState(AppState.IDLE); window.scrollTo({ top: 0, behavior: 'smooth' }); }}
       />

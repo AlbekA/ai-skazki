@@ -9,6 +9,7 @@ interface StoryModalProps {
   isOpen: boolean;
   onClose: () => void;
   onNewStory: () => void;
+  onAudioLoaded?: (audioData: string) => void; // New callback
   isStreaming?: boolean;
   userTier?: UserTier;
 }
@@ -42,7 +43,15 @@ async function decodeAudioData(
   return buffer;
 }
 
-const StoryModal: React.FC<StoryModalProps> = ({ story, isOpen, onClose, onNewStory, isStreaming = false, userTier = UserTier.GUEST }) => {
+const StoryModal: React.FC<StoryModalProps> = ({ 
+  story, 
+  isOpen, 
+  onClose, 
+  onNewStory, 
+  onAudioLoaded,
+  isStreaming = false, 
+  userTier = UserTier.GUEST 
+}) => {
   const [isPlaying, setIsPlaying] = useState(false);
   const [isLoadingAudio, setIsLoadingAudio] = useState(false);
   
@@ -50,6 +59,7 @@ const StoryModal: React.FC<StoryModalProps> = ({ story, isOpen, onClose, onNewSt
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioSourceRef = useRef<AudioBufferSourceNode | null>(null);
   const audioBufferRef = useRef<AudioBuffer | null>(null);
+  const lastLoadedAudioRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (isStreaming && contentEndRef.current) {
@@ -69,8 +79,8 @@ const StoryModal: React.FC<StoryModalProps> = ({ story, isOpen, onClose, onNewSt
   useEffect(() => {
     if (!isOpen) {
       stopAudio();
-    } else {
-       audioBufferRef.current = null;
+      audioBufferRef.current = null;
+      lastLoadedAudioRef.current = null;
     }
   }, [isOpen, story?.timestamp]);
 
@@ -85,13 +95,12 @@ const StoryModal: React.FC<StoryModalProps> = ({ story, isOpen, onClose, onNewSt
   };
 
   const isAudioDisabled = () => {
-    // Guests can't play audio if it's not the currently generating story
-    if (userTier === UserTier.GUEST && !isStreaming && !audioBufferRef.current) {
-      // Check if this story is from history (older than 10 seconds and no existing buffer)
-      const isHistory = story && (Date.now() - story.timestamp > 10000);
+    if (isStreaming || !story) return true;
+    if (userTier === UserTier.GUEST && !story.audio_data && !audioBufferRef.current) {
+      const isHistory = (Date.now() - story.timestamp > 15000);
       if (isHistory) return true;
     }
-    return isStreaming || !story;
+    return false;
   };
 
   const handleToggleAudio = async () => {
@@ -111,28 +120,34 @@ const StoryModal: React.FC<StoryModalProps> = ({ story, isOpen, onClose, onNewSt
         await audioContextRef.current.resume();
       }
 
-      if (!audioBufferRef.current) {
-        let base64Audio = story?.audio_data;
-        
-        // If no saved audio data, generate it (only for registered users or fresh guest generation)
-        if (!base64Audio && story) {
-          base64Audio = await generateStoryAudio(story.content, story.params.voice);
-        }
+      // 1. If we already have a decoded buffer in memory, use it
+      if (audioBufferRef.current) {
+        playBuffer(audioBufferRef.current);
+        setIsLoadingAudio(false);
+        return;
+      }
 
-        if (base64Audio) {
-          const byteArray = decode(base64Audio);
-          const buffer = await decodeAudioData(byteArray, audioContextRef.current, 24000, 1);
-          audioBufferRef.current = buffer;
+      // 2. If we have base64 in the story object but no buffer yet
+      let base64Audio = story?.audio_data;
+      
+      // 3. If no audio data anywhere, generate it
+      if (!base64Audio && story) {
+        base64Audio = await generateStoryAudio(story.content, story.params.voice);
+        // Save back to parent so it's not generated again for this story
+        if (onAudioLoaded && base64Audio) {
+          onAudioLoaded(base64Audio);
         }
       }
 
-      if (audioBufferRef.current) {
-        playBuffer(audioBufferRef.current);
+      if (base64Audio) {
+        const byteArray = decode(base64Audio);
+        const buffer = await decodeAudioData(byteArray, audioContextRef.current, 24000, 1);
+        audioBufferRef.current = buffer;
+        playBuffer(buffer);
       }
 
     } catch (error) {
       console.error("Audio playback failed:", error);
-      alert("Не удалось озвучить сказку.");
     } finally {
       setIsLoadingAudio(false);
     }
@@ -146,9 +161,10 @@ const StoryModal: React.FC<StoryModalProps> = ({ story, isOpen, onClose, onNewSt
       let base64Audio = story.audio_data;
       if (!base64Audio) {
         base64Audio = await generateStoryAudio(story.content, story.params.voice);
+        if (onAudioLoaded && base64Audio) onAudioLoaded(base64Audio);
       }
       
-      const blob = new Blob([decode(base64Audio)], { type: 'audio/pcm' });
+      const blob = new Blob([decode(base64Audio!)], { type: 'audio/pcm' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -166,6 +182,7 @@ const StoryModal: React.FC<StoryModalProps> = ({ story, isOpen, onClose, onNewSt
 
   const playBuffer = (buffer: AudioBuffer) => {
     if (!audioContextRef.current) return;
+    stopAudio();
     const source = audioContextRef.current.createBufferSource();
     source.buffer = buffer;
     source.connect(audioContextRef.current.destination);
@@ -236,7 +253,7 @@ const StoryModal: React.FC<StoryModalProps> = ({ story, isOpen, onClose, onNewSt
                )}
                
                <span className="text-xs font-medium text-indigo-200 hidden sm:inline">
-                 {isStreaming ? 'Магия...' : (isAudioDisabled() ? 'Озвучка недоступна' : 'Слушать')}
+                 {isStreaming ? 'Магия...' : (isAudioDisabled() ? 'Озвучка недоступна' : (isPlaying ? 'Играет' : 'Слушать'))}
                </span>
              </div>
 
