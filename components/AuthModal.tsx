@@ -1,3 +1,4 @@
+
 import React, { useState } from 'react';
 import { GlassCard, Button, Input } from './UIComponents';
 import { signInWithEmail, signUpWithEmail } from '../services/supabaseService';
@@ -5,7 +6,7 @@ import { signInWithEmail, signUpWithEmail } from '../services/supabaseService';
 interface AuthModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onSuccess: () => void;
+  onSuccess: (user: any) => void;
 }
 
 const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess }) => {
@@ -23,14 +24,18 @@ const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess }) => 
     setError(null);
 
     try {
-      const { error } = isLogin 
+      const { data, error } = isLogin 
         ? await signInWithEmail(email, password)
         : await signUpWithEmail(email, password);
 
       if (error) throw error;
       
-      onSuccess();
-      onClose();
+      if (data?.user) {
+        onSuccess(data.user);
+        onClose();
+      } else {
+        throw new Error("Не удалось получить данные пользователя");
+      }
     } catch (err: any) {
       setError(err.message || "Ошибка авторизации");
     } finally {

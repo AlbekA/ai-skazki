@@ -30,7 +30,7 @@ function App() {
   const [storyHistory, setStoryHistory] = useState<GeneratedStory[]>([]);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   
-  // Optimistic initial state for user
+  // 1. Instant optimistic user from localStorage
   const [user, setUser] = useState<UserProfile | null>(() => {
     try {
       const saved = localStorage.getItem('auth_user_profile');
@@ -49,7 +49,7 @@ function App() {
   
   const hasLoadedHistory = useRef(false);
 
-  // Persistence of user profile
+  // Sync user profile to storage
   useEffect(() => {
     if (user) {
       localStorage.setItem('auth_user_profile', JSON.stringify(user));
@@ -58,48 +58,42 @@ function App() {
     }
   }, [user]);
 
-  // Initialize Auth and Listeners
+  // Auth Initialization
   useEffect(() => {
     const savedGuest = localStorage.getItem('guest_usage');
     if (savedGuest) setGuestUsage(parseInt(savedGuest, 10));
 
     const supabase = getSupabase();
     if (supabase) {
-      // Background session check
+      // Check session once on mount
       supabase.auth.getSession().then(async ({ data: { session } }) => {
-        try {
-          if (session?.user) {
-            const profile = await getUserProfile(session.user);
-            setUser(profile);
-            await migrateAndLoadStories(profile);
-          } else {
-            // If no session on server, but we had an optimistic user, clear it
-            if (user) setUser(null);
+        if (session?.user) {
+          const profile = await getUserProfile(session.user);
+          setUser(profile);
+          await migrateAndLoadStories(profile);
+        } else {
+          // DO NOT setUser(null) here to avoid flickering optimistic state
+          // Only if we don't have an optimistic user at all, load local history
+          if (!localStorage.getItem('auth_user_profile')) {
             loadLocalHistory();
           }
-        } catch (err) {
-          console.error("Auth init error:", err);
-          loadLocalHistory();
-        } finally {
-          setIsAuthInit(false);
         }
+        setIsAuthInit(false);
       });
       
+      // Listen for global auth events
       const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
         if (session?.user) {
           const profile = await getUserProfile(session.user);
           setUser(profile);
           await migrateAndLoadStories(profile);
-          setIsAuthInit(false);
-        } else {
+        } else if (event === 'SIGNED_OUT') {
           setUser(null);
-          setIsAuthInit(false);
-          if (event === 'SIGNED_OUT') {
-             setStoryHistory([]);
-             hasLoadedHistory.current = false;
-             loadLocalHistory();
-          }
+          setStoryHistory([]);
+          hasLoadedHistory.current = false;
+          loadLocalHistory();
         }
+        setIsAuthInit(false);
       });
       return () => subscription.unsubscribe();
     } else {
@@ -122,9 +116,7 @@ function App() {
           dbStories = await getStories(profile.id);
           localStorage.removeItem('story_history');
         }
-      } catch (e) {
-        console.error("Migration failed:", e);
-      }
+      } catch (e) { console.error(e); }
     }
     
     setStoryHistory(dbStories);
@@ -134,15 +126,19 @@ function App() {
   const loadLocalHistory = () => {
     const savedHistory = localStorage.getItem('story_history');
     if (savedHistory) {
-      try {
-        setStoryHistory(JSON.parse(savedHistory));
-      } catch (e) {
-        setStoryHistory([]);
-      }
+      try { setStoryHistory(JSON.parse(savedHistory)); } catch (e) { setStoryHistory([]); }
     } else {
       setStoryHistory([]);
     }
     hasLoadedHistory.current = true;
+  };
+
+  // Immediate update after login in Modal
+  const handleAuthSuccess = async (supabaseUser: any) => {
+    setErrorMsg(null);
+    const profile = await getUserProfile(supabaseUser);
+    setUser(profile);
+    await migrateAndLoadStories(profile);
   };
 
   useEffect(() => {
@@ -255,9 +251,7 @@ function App() {
   };
 
   const handleUpdateProfile = (newName: string) => {
-    if (user) {
-      setUser({ ...user, displayName: newName });
-    }
+    if (user) setUser({ ...user, displayName: newName });
   };
 
   const handleSelectStoryFromProfile = (story: GeneratedStory) => {
@@ -286,8 +280,7 @@ function App() {
              {timeToNextUnlock ? (<span>Новая через: <span className="font-bold text-pink-300">{timeToNextUnlock}</span></span>) : (<span>Осталось сказок: <span className="font-bold text-white">{getRemainingGenerations()}</span></span>)}
           </div>
           
-          {/* Optimistic Auth Rendering: doesn't wait for isAuthInit to show structure */}
-          <div className="flex items-center gap-2 md:gap-3 flex-nowrap">
+          <div className="flex items-center gap-2 md:gap-3 flex-nowrap min-w-[120px] justify-end">
             {user ? (
               <>
                 <button 
@@ -297,7 +290,7 @@ function App() {
                   <div className="w-5 h-5 rounded-full bg-indigo-500 flex items-center justify-center text-[10px] font-bold text-white">
                     {(user.displayName || '?').charAt(0).toUpperCase()}
                   </div>
-                  <span>Мой профиль</span>
+                  <span className="hidden sm:inline">Мой профиль</span>
                 </button>
                 <Button variant="secondary" onClick={handleLogout} className="px-4 py-2 text-sm shadow-none whitespace-nowrap">Выйти</Button>
               </>
@@ -388,7 +381,7 @@ function App() {
         onNewStory={() => { setAppState(AppState.IDLE); window.scrollTo({ top: 0, behavior: 'smooth' }); }}
       />
       
-      <AuthModal isOpen={showAuthModal} onClose={() => setShowAuthModal(false)} onSuccess={() => setErrorMsg(null)} />
+      <AuthModal isOpen={showAuthModal} onClose={() => setShowAuthModal(false)} onSuccess={handleAuthSuccess} />
       
       {user && (
         <ProfileModal 
