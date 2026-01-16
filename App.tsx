@@ -37,17 +37,14 @@ function App() {
   const [timeToNextUnlock, setTimeToNextUnlock] = useState<string | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
   
-  // Ref to track if history is loaded to prevent clearing LocalStorage on mount
   const hasLoadedHistory = useRef(false);
 
   useEffect(() => {
-    // 1. Load guest usage
     const savedGuest = localStorage.getItem('guest_usage');
     if (savedGuest) setGuestUsage(parseInt(savedGuest, 10));
 
     const supabase = getSupabase();
     if (supabase) {
-      // 2. Initial Session Check
       supabase.auth.getSession().then(async ({ data: { session } }) => {
         try {
           if (session?.user) {
@@ -58,14 +55,12 @@ function App() {
             loadLocalHistory();
           }
         } catch (err) {
-          console.error("Session load error:", err);
           loadLocalHistory();
         } finally {
           setIsAuthInit(false);
         }
       });
       
-      // 3. Listen for Auth Changes
       const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
         if (session?.user) {
           const profile = await getUserProfile(session.user);
@@ -88,28 +83,30 @@ function App() {
     }
   }, []);
 
-  // Migration: Transfer local guest stories to user's database profile upon login
   const migrateAndLoadStories = async (profile: UserProfile) => {
     const localData = localStorage.getItem('story_history');
-    const dbStories = await getStories(profile.id);
+    let dbStories = await getStories(profile.id);
     
-    // Only migrate if the user is new (has no stories in DB) and has local ones
-    if (localData && dbStories.length === 0) {
+    // Improved migration: always try to migrate if local stories exist
+    if (localData) {
       try {
         const localStories: GeneratedStory[] = JSON.parse(localData);
-        for (const story of localStories) {
-          await saveStory(profile.id, story, story.audio_data);
+        if (localStories.length > 0) {
+          // Push local stories to DB
+          for (const story of localStories) {
+            // Avoid duplicates by title/content if needed, but here we just push
+            await saveStory(profile.id, story, story.audio_data);
+          }
+          // Refresh list from DB after migration
+          dbStories = await getStories(profile.id);
+          localStorage.removeItem('story_history');
         }
-        const migratedStories = await getStories(profile.id);
-        setStoryHistory(migratedStories);
-        localStorage.removeItem('story_history');
       } catch (e) {
-        console.error("Migration error:", e);
-        setStoryHistory(dbStories);
+        console.error("Migration failed:", e);
       }
-    } else {
-      setStoryHistory(dbStories);
     }
+    
+    setStoryHistory(dbStories);
     hasLoadedHistory.current = true;
   };
 
@@ -127,7 +124,6 @@ function App() {
     hasLoadedHistory.current = true;
   };
 
-  // Safe save: only sync storyHistory to localStorage for guests and ONLY after we know loading is finished
   useEffect(() => {
     if (!isAuthInit && !user && hasLoadedHistory.current) {
       localStorage.setItem('story_history', JSON.stringify(storyHistory.slice(0, 2)));
@@ -262,23 +258,24 @@ function App() {
           <span className="text-3xl">✨</span>
           <h1 className="text-xl md:text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-purple-200 to-indigo-200">AI Сказки</h1>
         </div>
+        
         <div className="flex items-center gap-2 md:gap-4">
           <div className="px-3 py-1 rounded-full bg-white/5 border border-white/10 text-[10px] md:text-xs text-indigo-200">
              {timeToNextUnlock ? (<span>Новая через: <span className="font-bold text-pink-300">{timeToNextUnlock}</span></span>) : (<span>Осталось сказок: <span className="font-bold text-white">{getRemainingGenerations()}</span></span>)}
           </div>
           {!isAuthInit && (
             user ? (
-              <div className="flex items-center gap-2 md:gap-4">
+              <div className="flex items-center gap-2 md:gap-3">
                 <button 
                   onClick={() => setShowProfileModal(true)}
-                  className="flex items-center gap-2 px-3 py-2 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 transition-all text-xs md:text-sm font-medium"
+                  className="flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-500/10 border border-indigo-500/30 hover:bg-indigo-500/20 transition-all text-sm font-semibold text-indigo-100 whitespace-nowrap"
                 >
-                  <div className="w-6 h-6 rounded-full bg-indigo-500/30 flex items-center justify-center text-xs font-bold">
+                  <div className="w-5 h-5 rounded-full bg-indigo-500 flex items-center justify-center text-[10px] font-bold text-white">
                     {(user.displayName || '?').charAt(0).toUpperCase()}
                   </div>
                   <span>Мой профиль</span>
                 </button>
-                <Button variant="secondary" onClick={handleLogout} className="px-3 md:px-4 py-2 text-xs md:text-sm">Выйти</Button>
+                <Button variant="secondary" onClick={handleLogout} className="px-4 py-2 text-sm shadow-none">Выйти</Button>
               </div>
             ) : (
               <Button variant="primary" onClick={() => setShowAuthModal(true)} className="px-4 py-2 text-sm shadow-none">Войти</Button>
@@ -327,21 +324,29 @@ function App() {
 
           {storyHistory.length > 0 && (
             <div className="mt-12 animate-fade-in delay-200">
-              <h3 className="text-xl font-semibold mb-4 text-indigo-200 pl-2">Моя библиотека</h3>
+              <h3 className="text-xl font-semibold mb-4 text-indigo-200 pl-2 flex items-center gap-2">
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
+                </svg>
+                Моя библиотека
+              </h3>
               <div className="grid gap-4 md:grid-cols-2">
-                {storyHistory.map((hist, idx) => (
-                  <GlassCard key={hist.id || idx} className="hover:bg-white/15 transition-colors cursor-pointer group" onClick={() => { setCurrentStory(hist); setAppState(AppState.SUCCESS); setIsStreaming(false); }}>
+                {storyHistory.slice(0, 4).map((hist, idx) => (
+                  <GlassCard key={hist.id || idx} className="hover:bg-white/15 transition-all cursor-pointer group hover:scale-[1.01]" onClick={() => { setCurrentStory(hist); setAppState(AppState.SUCCESS); setIsStreaming(false); }}>
                     <div className="flex justify-between items-start mb-2">
                       <span className="text-2xl">{SCENARIO_OPTIONS.find(o => o.value === hist.params.scenario)?.icon || '✨'}</span>
-                      <span className="text-xs text-indigo-300">{new Date(hist.timestamp).toLocaleDateString()}</span>
+                      <span className="text-[10px] text-indigo-300 font-bold uppercase tracking-wider">{new Date(hist.timestamp).toLocaleDateString()}</span>
                     </div>
-                    <h4 className="font-bold text-lg mb-2 group-hover:text-purple-300 transition-colors">{hist.title}</h4>
-                    <p className="text-sm text-gray-400 line-clamp-3">{hist.content}</p>
-                    {hist.audio_data && (
-                      <div className="mt-3 flex items-center gap-1 text-[10px] text-indigo-400 font-bold uppercase tracking-wider">
-                         <div className="w-1 h-1 bg-indigo-400 rounded-full animate-pulse" /> Аудио сохранено
-                      </div>
-                    )}
+                    <h4 className="font-bold text-lg mb-2 group-hover:text-purple-300 transition-colors line-clamp-1">{hist.title}</h4>
+                    <p className="text-sm text-gray-400 line-clamp-2">{hist.content}</p>
+                    <div className="mt-3 flex items-center justify-between">
+                       {hist.audio_data && (
+                        <div className="flex items-center gap-1 text-[10px] text-indigo-400 font-bold uppercase tracking-wider">
+                           <div className="w-1.5 h-1.5 bg-indigo-400 rounded-full animate-pulse" /> Аудио
+                        </div>
+                       )}
+                       <span className="text-[10px] text-indigo-200/50 group-hover:text-indigo-200 font-bold uppercase">Читать →</span>
+                    </div>
                   </GlassCard>
                 ))}
               </div>
@@ -350,7 +355,6 @@ function App() {
         </div>
       </main>
 
-      {/* Modals */}
       <StoryModal 
         story={currentStory} 
         isOpen={appState === AppState.SUCCESS && !!currentStory} 
