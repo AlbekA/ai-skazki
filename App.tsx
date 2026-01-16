@@ -29,7 +29,17 @@ function App() {
   const [currentStory, setCurrentStory] = useState<GeneratedStory | null>(null);
   const [storyHistory, setStoryHistory] = useState<GeneratedStory[]>([]);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [user, setUser] = useState<UserProfile | null>(null);
+  
+  // Optimistic initial state for user
+  const [user, setUser] = useState<UserProfile | null>(() => {
+    try {
+      const saved = localStorage.getItem('auth_user_profile');
+      return saved ? JSON.parse(saved) : null;
+    } catch {
+      return null;
+    }
+  });
+
   const [guestUsage, setGuestUsage] = useState(0);
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [showProfileModal, setShowProfileModal] = useState(false);
@@ -39,6 +49,15 @@ function App() {
   
   const hasLoadedHistory = useRef(false);
 
+  // Persistence of user profile
+  useEffect(() => {
+    if (user) {
+      localStorage.setItem('auth_user_profile', JSON.stringify(user));
+    } else {
+      localStorage.removeItem('auth_user_profile');
+    }
+  }, [user]);
+
   // Initialize Auth and Listeners
   useEffect(() => {
     const savedGuest = localStorage.getItem('guest_usage');
@@ -46,7 +65,7 @@ function App() {
 
     const supabase = getSupabase();
     if (supabase) {
-      // 1. Check current session immediately
+      // Background session check
       supabase.auth.getSession().then(async ({ data: { session } }) => {
         try {
           if (session?.user) {
@@ -54,17 +73,18 @@ function App() {
             setUser(profile);
             await migrateAndLoadStories(profile);
           } else {
+            // If no session on server, but we had an optimistic user, clear it
+            if (user) setUser(null);
             loadLocalHistory();
           }
         } catch (err) {
           console.error("Auth init error:", err);
           loadLocalHistory();
         } finally {
-          setIsAuthInit(false); // Crucial: unlock UI regardless of outcome
+          setIsAuthInit(false);
         }
       });
       
-      // 2. Listen for auth changes (login/logout)
       const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
         if (session?.user) {
           const profile = await getUserProfile(session.user);
@@ -73,7 +93,7 @@ function App() {
           setIsAuthInit(false);
         } else {
           setUser(null);
-          setIsAuthInit(false); // Ensure UI unlocks for guests too
+          setIsAuthInit(false);
           if (event === 'SIGNED_OUT') {
              setStoryHistory([]);
              hasLoadedHistory.current = false;
@@ -88,7 +108,6 @@ function App() {
     }
   }, []);
 
-  // Migrates local stories to Supabase and loads history
   const migrateAndLoadStories = async (profile: UserProfile) => {
     const localData = localStorage.getItem('story_history');
     let dbStories = await getStories(profile.id);
@@ -97,11 +116,9 @@ function App() {
       try {
         const localStories: GeneratedStory[] = JSON.parse(localData);
         if (localStories.length > 0) {
-          // Upload local stories to user profile in DB
           for (const story of localStories) {
             await saveStory(profile.id, story, story.audio_data);
           }
-          // Reload from DB to get IDs and correct timestamps
           dbStories = await getStories(profile.id);
           localStorage.removeItem('story_history');
         }
@@ -128,14 +145,12 @@ function App() {
     hasLoadedHistory.current = true;
   };
 
-  // Sync history to localStorage ONLY for guests
   useEffect(() => {
-    if (!isAuthInit && !user && hasLoadedHistory.current) {
+    if (!user && hasLoadedHistory.current) {
       localStorage.setItem('story_history', JSON.stringify(storyHistory.slice(0, 2)));
     }
-  }, [storyHistory, user, isAuthInit]);
+  }, [storyHistory, user]);
 
-  // Countdown timer for next generation
   useEffect(() => {
     if (!user || !user.lastGenerationDate) {
       setTimeToNextUnlock(null);
@@ -235,6 +250,7 @@ function App() {
     setUser(null);
     setIsInteractive(false);
     setSelectedVoice(VoiceOption.KORE);
+    localStorage.removeItem('auth_user_profile');
     loadLocalHistory();
   };
 
@@ -270,10 +286,10 @@ function App() {
              {timeToNextUnlock ? (<span>Новая через: <span className="font-bold text-pink-300">{timeToNextUnlock}</span></span>) : (<span>Осталось сказок: <span className="font-bold text-white">{getRemainingGenerations()}</span></span>)}
           </div>
           
-          {/* Auth Section - Always Unlocks via isAuthInit */}
-          {!isAuthInit ? (
-            user ? (
-              <div className="flex items-center gap-2 md:gap-3 flex-nowrap">
+          {/* Optimistic Auth Rendering: doesn't wait for isAuthInit to show structure */}
+          <div className="flex items-center gap-2 md:gap-3 flex-nowrap">
+            {user ? (
+              <>
                 <button 
                   onClick={() => setShowProfileModal(true)}
                   className="flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-500/10 border border-indigo-500/30 hover:bg-indigo-500/20 transition-all text-sm font-semibold text-indigo-100 whitespace-nowrap"
@@ -284,13 +300,11 @@ function App() {
                   <span>Мой профиль</span>
                 </button>
                 <Button variant="secondary" onClick={handleLogout} className="px-4 py-2 text-sm shadow-none whitespace-nowrap">Выйти</Button>
-              </div>
+              </>
             ) : (
               <Button variant="primary" onClick={() => setShowAuthModal(true)} className="px-4 py-2 text-sm shadow-none whitespace-nowrap">Войти</Button>
-            )
-          ) : (
-            <div className="w-20 h-8 bg-white/5 animate-pulse rounded-xl" /> // Loading placeholder for buttons
-          )}
+            )}
+          </div>
         </div>
       </header>
 
@@ -332,7 +346,6 @@ function App() {
             </div>
           </GlassCard>
 
-          {/* Main Library Preview */}
           {storyHistory.length > 0 && (
             <div className="mt-12 animate-fade-in delay-200">
               <h3 className="text-xl font-semibold mb-4 text-indigo-200 pl-2 flex items-center gap-2">
@@ -366,7 +379,6 @@ function App() {
         </div>
       </main>
 
-      {/* Modals */}
       <StoryModal 
         story={currentStory} 
         isOpen={appState === AppState.SUCCESS && !!currentStory} 
