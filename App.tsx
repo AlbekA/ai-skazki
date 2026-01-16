@@ -27,14 +27,22 @@ function App() {
   const [selectedVoice, setSelectedVoice] = useState<string>(VoiceOption.KORE);
   const [isInteractive, setIsInteractive] = useState(false);
   const [currentStory, setCurrentStory] = useState<GeneratedStory | null>(null);
-  const [storyHistory, setStoryHistory] = useState<GeneratedStory[]>([]);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   
+  // 1. Initialize user from persistent storage to avoid flickering
   const [user, setUser] = useState<UserProfile | null>(() => {
     try {
       const saved = localStorage.getItem('auth_user_profile');
       return saved ? JSON.parse(saved) : null;
     } catch { return null; }
+  });
+
+  // 2. Initialize history from cache for instant display on refresh
+  const [storyHistory, setStoryHistory] = useState<GeneratedStory[]>(() => {
+    try {
+      const saved = localStorage.getItem('story_history_cache');
+      return saved ? JSON.parse(saved) : [];
+    } catch { return []; }
   });
 
   const [guestUsage, setGuestUsage] = useState(0);
@@ -46,6 +54,13 @@ function App() {
   
   const hasLoadedHistory = useRef(false);
 
+  // Sync history to cache whenever it changes
+  useEffect(() => {
+    if (storyHistory.length > 0) {
+      localStorage.setItem('story_history_cache', JSON.stringify(storyHistory));
+    }
+  }, [storyHistory]);
+
   useEffect(() => {
     if (user) {
       localStorage.setItem('auth_user_profile', JSON.stringify(user));
@@ -54,6 +69,7 @@ function App() {
     }
   }, [user]);
 
+  // Auth & Session Logic
   useEffect(() => {
     const savedGuest = localStorage.getItem('guest_usage');
     if (savedGuest) setGuestUsage(parseInt(savedGuest, 10));
@@ -66,6 +82,7 @@ function App() {
           setUser(profile);
           await migrateAndLoadStories(profile);
         } else {
+          // If no session but we have an optimistic user, clear it unless it was just initialized
           if (!localStorage.getItem('auth_user_profile')) {
             loadLocalHistory();
           }
@@ -81,6 +98,7 @@ function App() {
         } else if (event === 'SIGNED_OUT') {
           setUser(null);
           setStoryHistory([]);
+          localStorage.removeItem('story_history_cache');
           hasLoadedHistory.current = false;
           loadLocalHistory();
         }
@@ -97,6 +115,7 @@ function App() {
     const localData = localStorage.getItem('story_history');
     let dbStories = await getStories(profile.id);
     
+    // Migration logic for guests becoming users
     if (localData) {
       try {
         const localStories: GeneratedStory[] = JSON.parse(localData);
@@ -117,25 +136,24 @@ function App() {
   const loadLocalHistory = () => {
     const savedHistory = localStorage.getItem('story_history');
     if (savedHistory) {
-      try { setStoryHistory(JSON.parse(savedHistory)); } catch (e) { setStoryHistory([]); }
+      try { 
+        const parsed = JSON.parse(savedHistory);
+        setStoryHistory(parsed); 
+      } catch (e) { setStoryHistory([]); }
     } else {
-      setStoryHistory([]);
+      // Keep cached history if available
     }
     hasLoadedHistory.current = true;
   };
 
   const handleAuthSuccess = async (supabaseUser: any) => {
+    setIsAuthInit(true);
     setErrorMsg(null);
     const profile = await getUserProfile(supabaseUser);
     setUser(profile);
     await migrateAndLoadStories(profile);
+    setIsAuthInit(false);
   };
-
-  useEffect(() => {
-    if (!user && hasLoadedHistory.current) {
-      localStorage.setItem('story_history', JSON.stringify(storyHistory.slice(0, 2)));
-    }
-  }, [storyHistory, user]);
 
   useEffect(() => {
     if (!user || !user.lastGenerationDate) {
@@ -205,45 +223,50 @@ function App() {
         if (isComplete) {
           setIsStreaming(false);
           
-          // Phase 1: Immediate save text and update history
+          // Phase 1: Mгновенно добавляем в локальную историю
+          setStoryHistory(prev => [newStory, ...prev]);
+
+          // Phase 2: Background Database Save
           let savedId: string | undefined = undefined;
           
           if (user) {
-            const savedDbStory = await saveStory(user.id, newStory);
-            if (savedDbStory) {
-              savedId = savedDbStory.id;
-              const storyWithId = { ...newStory, id: savedId };
-              setCurrentStory(storyWithId);
-              setStoryHistory(prev => [storyWithId, ...prev]);
-              
-              // Refresh profile for generation count
-              getUserProfile({ id: user.id } as any).then(p => setUser(p));
-            }
-          } else {
-            setStoryHistory(prev => {
-              const updated = [newStory, ...prev].slice(0, 2);
-              localStorage.setItem('story_history', JSON.stringify(updated));
-              return updated;
+            saveStory(user.id, newStory).then(async (savedDbStory) => {
+              if (savedDbStory) {
+                savedId = savedDbStory.id;
+                // Update the local entry with real ID
+                setStoryHistory(prev => prev.map(s => s.timestamp === newStory.timestamp ? { ...s, id: savedId } : s));
+                // Refresh profile stats
+                getUserProfile({ id: user.id } as any).then(p => setUser(p));
+              }
             });
+          } else {
             const newUsage = guestUsage + 1;
             setGuestUsage(newUsage);
             localStorage.setItem('guest_usage', newUsage.toString());
+            // Mirror history for guest persistence
+            localStorage.setItem('story_history', JSON.stringify([newStory, ...storyHistory].slice(0, 2)));
           }
 
-          // Phase 2: Background Audio Generation
+          // Phase 3: Background Audio Generation
           generateStoryAudio(newStory.content, newStory.params.voice).then(async (audioData) => {
             if (audioData) {
-              // Update local state history
               setStoryHistory(prev => prev.map(s => 
                 (s.timestamp === newStory.timestamp) ? { ...s, audio_data: audioData } : s
               ));
               
-              // Update current view if it's the same story
-              setCurrentStory(prev => prev && prev.timestamp === newStory.timestamp ? { ...prev, audio_data: audioData } : prev);
+              if (currentStory && currentStory.timestamp === newStory.timestamp) {
+                setCurrentStory(prev => prev ? { ...prev, audio_data: audioData } : null);
+              }
 
-              // Update Database if logged in
-              if (user && savedId) {
-                await updateStoryAudio(savedId, audioData);
+              if (user) {
+                // Wait for Phase 2 to get the ID if needed
+                const checkInterval = setInterval(async () => {
+                  if (savedId) {
+                    await updateStoryAudio(savedId, audioData);
+                    clearInterval(checkInterval);
+                  }
+                }, 1000);
+                setTimeout(() => clearInterval(checkInterval), 10000);
               }
             }
           }).catch(err => console.error("Background Audio Error:", err));
@@ -264,6 +287,7 @@ function App() {
     setIsInteractive(false);
     setSelectedVoice(VoiceOption.KORE);
     localStorage.removeItem('auth_user_profile');
+    localStorage.removeItem('story_history_cache');
     loadLocalHistory();
   };
 
@@ -298,21 +322,25 @@ function App() {
           </div>
           
           <div className="flex items-center gap-2 md:gap-3 flex-nowrap min-w-[120px] justify-end">
-            {user ? (
-              <>
-                <button 
-                  onClick={() => setShowProfileModal(true)}
-                  className="flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-500/10 border border-indigo-500/30 hover:bg-indigo-500/20 transition-all text-sm font-semibold text-indigo-100 whitespace-nowrap"
-                >
-                  <div className="w-5 h-5 rounded-full bg-indigo-500 flex items-center justify-center text-[10px] font-bold text-white">
-                    {(user.displayName || '?').charAt(0).toUpperCase()}
-                  </div>
-                  <span className="hidden sm:inline">Мой профиль</span>
-                </button>
-                <Button variant="secondary" onClick={handleLogout} className="px-4 py-2 text-sm shadow-none whitespace-nowrap">Выйти</Button>
-              </>
+            {!isAuthInit ? (
+              user ? (
+                <>
+                  <button 
+                    onClick={() => setShowProfileModal(true)}
+                    className="flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-500/10 border border-indigo-500/30 hover:bg-indigo-500/20 transition-all text-sm font-semibold text-indigo-100 whitespace-nowrap"
+                  >
+                    <div className="w-5 h-5 rounded-full bg-indigo-500 flex items-center justify-center text-[10px] font-bold text-white">
+                      {(user.displayName || '?').charAt(0).toUpperCase()}
+                    </div>
+                    <span className="hidden sm:inline">Мой профиль</span>
+                  </button>
+                  <Button variant="secondary" onClick={handleLogout} className="px-4 py-2 text-sm shadow-none whitespace-nowrap">Выйти</Button>
+                </>
+              ) : (
+                <Button variant="primary" onClick={() => setShowAuthModal(true)} className="px-4 py-2 text-sm shadow-none whitespace-nowrap">Войти</Button>
+              )
             ) : (
-              <Button variant="primary" onClick={() => setShowAuthModal(true)} className="px-4 py-2 text-sm shadow-none whitespace-nowrap">Войти</Button>
+              <div className="w-10 h-10 border-2 border-white/10 border-t-white/50 rounded-full animate-spin"></div>
             )}
           </div>
         </div>

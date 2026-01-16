@@ -31,13 +31,14 @@ const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess }) => 
       if (error) throw error;
       
       if (data?.user) {
+        // Pass data back to App immediately
         onSuccess(data.user);
         onClose();
       } else {
         throw new Error("Не удалось получить данные пользователя");
       }
     } catch (err: any) {
-      setError(err.message || "Ошибка авторизации");
+      setError(err.message || "Ошибка авторизации. Проверьте данные.");
     } finally {
       setLoading(false);
     }
@@ -65,6 +66,7 @@ const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess }) => 
             value={email} 
             onChange={(e) => setEmail(e.target.value)} 
             required 
+            autoComplete="email"
           />
           <Input 
             label="Пароль" 
@@ -72,15 +74,17 @@ const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess }) => 
             value={password} 
             onChange={(e) => setPassword(e.target.value)} 
             required 
+            autoComplete={isLogin ? "current-password" : "new-password"}
           />
           
           <Button type="submit" disabled={loading} className="w-full mt-4">
-            {loading ? 'Загрузка...' : (isLogin ? 'Войти' : 'Создать аккаунт')}
+            {loading ? <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin mx-auto"></div> : (isLogin ? 'Войти' : 'Создать аккаунт')}
           </Button>
         </form>
 
         <div className="mt-4 text-center text-sm text-gray-400">
           <button 
+            type="button"
             onClick={() => setIsLogin(!isLogin)}
             className="text-purple-400 hover:text-purple-300 underline"
           >
