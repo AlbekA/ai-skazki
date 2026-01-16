@@ -39,12 +39,14 @@ function App() {
   
   const hasLoadedHistory = useRef(false);
 
+  // Initialize Auth and Listeners
   useEffect(() => {
     const savedGuest = localStorage.getItem('guest_usage');
     if (savedGuest) setGuestUsage(parseInt(savedGuest, 10));
 
     const supabase = getSupabase();
     if (supabase) {
+      // 1. Check current session immediately
       supabase.auth.getSession().then(async ({ data: { session } }) => {
         try {
           if (session?.user) {
@@ -55,12 +57,14 @@ function App() {
             loadLocalHistory();
           }
         } catch (err) {
+          console.error("Auth init error:", err);
           loadLocalHistory();
         } finally {
-          setIsAuthInit(false);
+          setIsAuthInit(false); // Crucial: unlock UI regardless of outcome
         }
       });
       
+      // 2. Listen for auth changes (login/logout)
       const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
         if (session?.user) {
           const profile = await getUserProfile(session.user);
@@ -69,6 +73,7 @@ function App() {
           setIsAuthInit(false);
         } else {
           setUser(null);
+          setIsAuthInit(false); // Ensure UI unlocks for guests too
           if (event === 'SIGNED_OUT') {
              setStoryHistory([]);
              hasLoadedHistory.current = false;
@@ -83,21 +88,20 @@ function App() {
     }
   }, []);
 
+  // Migrates local stories to Supabase and loads history
   const migrateAndLoadStories = async (profile: UserProfile) => {
     const localData = localStorage.getItem('story_history');
     let dbStories = await getStories(profile.id);
     
-    // Improved migration: always try to migrate if local stories exist
     if (localData) {
       try {
         const localStories: GeneratedStory[] = JSON.parse(localData);
         if (localStories.length > 0) {
-          // Push local stories to DB
+          // Upload local stories to user profile in DB
           for (const story of localStories) {
-            // Avoid duplicates by title/content if needed, but here we just push
             await saveStory(profile.id, story, story.audio_data);
           }
-          // Refresh list from DB after migration
+          // Reload from DB to get IDs and correct timestamps
           dbStories = await getStories(profile.id);
           localStorage.removeItem('story_history');
         }
@@ -124,12 +128,14 @@ function App() {
     hasLoadedHistory.current = true;
   };
 
+  // Sync history to localStorage ONLY for guests
   useEffect(() => {
     if (!isAuthInit && !user && hasLoadedHistory.current) {
       localStorage.setItem('story_history', JSON.stringify(storyHistory.slice(0, 2)));
     }
   }, [storyHistory, user, isAuthInit]);
 
+  // Countdown timer for next generation
   useEffect(() => {
     if (!user || !user.lastGenerationDate) {
       setTimeToNextUnlock(null);
@@ -263,9 +269,11 @@ function App() {
           <div className="px-3 py-1 rounded-full bg-white/5 border border-white/10 text-[10px] md:text-xs text-indigo-200">
              {timeToNextUnlock ? (<span>Новая через: <span className="font-bold text-pink-300">{timeToNextUnlock}</span></span>) : (<span>Осталось сказок: <span className="font-bold text-white">{getRemainingGenerations()}</span></span>)}
           </div>
-          {!isAuthInit && (
+          
+          {/* Auth Section - Always Unlocks via isAuthInit */}
+          {!isAuthInit ? (
             user ? (
-              <div className="flex items-center gap-2 md:gap-3">
+              <div className="flex items-center gap-2 md:gap-3 flex-nowrap">
                 <button 
                   onClick={() => setShowProfileModal(true)}
                   className="flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-500/10 border border-indigo-500/30 hover:bg-indigo-500/20 transition-all text-sm font-semibold text-indigo-100 whitespace-nowrap"
@@ -275,11 +283,13 @@ function App() {
                   </div>
                   <span>Мой профиль</span>
                 </button>
-                <Button variant="secondary" onClick={handleLogout} className="px-4 py-2 text-sm shadow-none">Выйти</Button>
+                <Button variant="secondary" onClick={handleLogout} className="px-4 py-2 text-sm shadow-none whitespace-nowrap">Выйти</Button>
               </div>
             ) : (
-              <Button variant="primary" onClick={() => setShowAuthModal(true)} className="px-4 py-2 text-sm shadow-none">Войти</Button>
+              <Button variant="primary" onClick={() => setShowAuthModal(true)} className="px-4 py-2 text-sm shadow-none whitespace-nowrap">Войти</Button>
             )
+          ) : (
+            <div className="w-20 h-8 bg-white/5 animate-pulse rounded-xl" /> // Loading placeholder for buttons
           )}
         </div>
       </header>
@@ -322,6 +332,7 @@ function App() {
             </div>
           </GlassCard>
 
+          {/* Main Library Preview */}
           {storyHistory.length > 0 && (
             <div className="mt-12 animate-fade-in delay-200">
               <h3 className="text-xl font-semibold mb-4 text-indigo-200 pl-2 flex items-center gap-2">
@@ -355,6 +366,7 @@ function App() {
         </div>
       </main>
 
+      {/* Modals */}
       <StoryModal 
         story={currentStory} 
         isOpen={appState === AppState.SUCCESS && !!currentStory} 
@@ -363,6 +375,7 @@ function App() {
         userTier={user?.tier}
         onNewStory={() => { setAppState(AppState.IDLE); window.scrollTo({ top: 0, behavior: 'smooth' }); }}
       />
+      
       <AuthModal isOpen={showAuthModal} onClose={() => setShowAuthModal(false)} onSuccess={() => setErrorMsg(null)} />
       
       {user && (
