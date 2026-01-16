@@ -29,7 +29,7 @@ function App() {
   const [currentStory, setCurrentStory] = useState<GeneratedStory | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   
-  // 1. Initialize user from persistent storage to avoid flickering
+  // 1. Instant User Load from Cache
   const [user, setUser] = useState<UserProfile | null>(() => {
     try {
       const saved = localStorage.getItem('auth_user_profile');
@@ -37,7 +37,7 @@ function App() {
     } catch { return null; }
   });
 
-  // 2. Initialize history from cache for instant display on refresh
+  // 2. Instant History Load from Cache
   const [storyHistory, setStoryHistory] = useState<GeneratedStory[]>(() => {
     try {
       const saved = localStorage.getItem('story_history_cache');
@@ -45,7 +45,11 @@ function App() {
     } catch { return []; }
   });
 
-  const [guestUsage, setGuestUsage] = useState(0);
+  const [guestUsage, setGuestUsage] = useState(() => {
+    const saved = localStorage.getItem('guest_usage');
+    return saved ? parseInt(saved, 10) : 0;
+  });
+
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [isAuthInit, setIsAuthInit] = useState(true);
@@ -54,132 +58,76 @@ function App() {
   
   const hasLoadedHistory = useRef(false);
 
-  // Sync history to cache whenever it changes
+  // Sync state to cache
   useEffect(() => {
-    if (storyHistory.length > 0) {
-      localStorage.setItem('story_history_cache', JSON.stringify(storyHistory));
-    }
-  }, [storyHistory]);
-
-  useEffect(() => {
-    if (user) {
-      localStorage.setItem('auth_user_profile', JSON.stringify(user));
-    } else {
-      localStorage.removeItem('auth_user_profile');
-    }
+    if (user) localStorage.setItem('auth_user_profile', JSON.stringify(user));
+    else localStorage.removeItem('auth_user_profile');
   }, [user]);
 
-  // Auth & Session Logic
   useEffect(() => {
-    const savedGuest = localStorage.getItem('guest_usage');
-    if (savedGuest) setGuestUsage(parseInt(savedGuest, 10));
+    localStorage.setItem('story_history_cache', JSON.stringify(storyHistory));
+  }, [storyHistory]);
 
+  // Reliable Auth Initialization
+  useEffect(() => {
     const supabase = getSupabase();
     if (supabase) {
+      // Check current session immediately
       supabase.auth.getSession().then(async ({ data: { session } }) => {
         if (session?.user) {
           const profile = await getUserProfile(session.user);
           setUser(profile);
-          await migrateAndLoadStories(profile);
-        } else {
-          // If no session but we have an optimistic user, clear it unless it was just initialized
-          if (!localStorage.getItem('auth_user_profile')) {
-            loadLocalHistory();
-          }
+          await loadAndCacheStories(profile.id);
         }
         setIsAuthInit(false);
       });
       
+      // Listen for changes
       const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
         if (session?.user) {
           const profile = await getUserProfile(session.user);
           setUser(profile);
-          await migrateAndLoadStories(profile);
+          await loadAndCacheStories(profile.id);
         } else if (event === 'SIGNED_OUT') {
-          setUser(null);
-          setStoryHistory([]);
-          localStorage.removeItem('story_history_cache');
-          hasLoadedHistory.current = false;
-          loadLocalHistory();
+          handleLogoutCleanup();
         }
         setIsAuthInit(false);
       });
       return () => subscription.unsubscribe();
     } else {
-      loadLocalHistory();
       setIsAuthInit(false);
     }
   }, []);
 
-  const migrateAndLoadStories = async (profile: UserProfile) => {
-    const localData = localStorage.getItem('story_history');
-    let dbStories = await getStories(profile.id);
-    
-    // Migration logic for guests becoming users
-    if (localData) {
-      try {
-        const localStories: GeneratedStory[] = JSON.parse(localData);
-        if (localStories.length > 0) {
-          for (const story of localStories) {
-            await saveStory(profile.id, story, story.audio_data);
-          }
-          dbStories = await getStories(profile.id);
-          localStorage.removeItem('story_history');
-        }
-      } catch (e) { console.error(e); }
-    }
-    
+  const loadAndCacheStories = async (userId: string) => {
+    const dbStories = await getStories(userId);
     setStoryHistory(dbStories);
     hasLoadedHistory.current = true;
   };
 
-  const loadLocalHistory = () => {
-    const savedHistory = localStorage.getItem('story_history');
-    if (savedHistory) {
-      try { 
-        const parsed = JSON.parse(savedHistory);
-        setStoryHistory(parsed); 
-      } catch (e) { setStoryHistory([]); }
-    } else {
-      // Keep cached history if available
-    }
-    hasLoadedHistory.current = true;
+  const handleLogoutCleanup = () => {
+    setUser(null);
+    setStoryHistory([]);
+    setIsInteractive(false);
+    setSelectedVoice(VoiceOption.KORE);
+    localStorage.removeItem('auth_user_profile');
+    localStorage.removeItem('story_history_cache');
+    localStorage.removeItem('guest_usage');
+    setGuestUsage(0);
   };
 
   const handleAuthSuccess = async (supabaseUser: any) => {
+    // Immediate feedback on login
     setIsAuthInit(true);
-    setErrorMsg(null);
     const profile = await getUserProfile(supabaseUser);
     setUser(profile);
-    await migrateAndLoadStories(profile);
+    await loadAndCacheStories(profile.id);
     setIsAuthInit(false);
+    setShowAuthModal(false);
   };
 
-  useEffect(() => {
-    if (!user || !user.lastGenerationDate) {
-      setTimeToNextUnlock(null);
-      return;
-    }
-    const calculateTime = () => {
-      if (getRemainingGenerations() > 0) {
-        setTimeToNextUnlock(null);
-        return;
-      }
-      const lastGenTime = new Date(user.lastGenerationDate!).getTime();
-      let cooldownMs = user.tier === UserTier.FREE ? 7 * 24 * 60 * 60 * 1000 : 24 * 60 * 60 * 1000;
-      const diff = lastGenTime + cooldownMs - Date.now();
-      if (diff <= 0) { setTimeToNextUnlock(null); return; }
-      const days = Math.floor(diff / (1000 * 60 * 60 * 24));
-      const hours = Math.floor((diff % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
-      const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
-      setTimeToNextUnlock(`${days > 0 ? days + 'д ' : ''}${hours}ч ${minutes}м`);
-    };
-    const interval = setInterval(calculateTime, 60000);
-    calculateTime();
-    return () => clearInterval(interval);
-  }, [user, guestUsage]);
-
   const isPremiumUnlocked = () => user?.tier === UserTier.STORYTELLER || user?.tier === UserTier.WIZARD;
+  const getRemainingGenerations = () => user ? Math.max(0, TIERS[user.tier].limit - user.generationsUsed) : Math.max(0, 1 - guestUsage);
 
   const handleGenerate = async () => {
     if (!childName.trim()) { setErrorMsg("Пожалуйста, введите имя ребенка"); return; }
@@ -223,53 +171,52 @@ function App() {
         if (isComplete) {
           setIsStreaming(false);
           
-          // Phase 1: Mгновенно добавляем в локальную историю
+          // PHASE 1: Add to local history instantly
           setStoryHistory(prev => [newStory, ...prev]);
 
-          // Phase 2: Background Database Save
-          let savedId: string | undefined = undefined;
+          // PHASE 2: Background Save
+          let savedStoryId: string | undefined;
           
           if (user) {
-            saveStory(user.id, newStory).then(async (savedDbStory) => {
-              if (savedDbStory) {
-                savedId = savedDbStory.id;
-                // Update the local entry with real ID
-                setStoryHistory(prev => prev.map(s => s.timestamp === newStory.timestamp ? { ...s, id: savedId } : s));
-                // Refresh profile stats
+            saveStory(user.id, newStory).then(async (dbResponse) => {
+              if (dbResponse) {
+                savedStoryId = dbResponse.id;
+                // Tag the local story with its DB ID
+                setStoryHistory(prev => prev.map(s => s.timestamp === newStory.timestamp ? { ...s, id: savedStoryId } : s));
+                // Update profile usage count
                 getUserProfile({ id: user.id } as any).then(p => setUser(p));
               }
             });
           } else {
-            const newUsage = guestUsage + 1;
-            setGuestUsage(newUsage);
-            localStorage.setItem('guest_usage', newUsage.toString());
-            // Mirror history for guest persistence
-            localStorage.setItem('story_history', JSON.stringify([newStory, ...storyHistory].slice(0, 2)));
+            const nextUsage = guestUsage + 1;
+            setGuestUsage(nextUsage);
+            localStorage.setItem('guest_usage', nextUsage.toString());
           }
 
-          // Phase 3: Background Audio Generation
+          // PHASE 3: Background Audio Generation
           generateStoryAudio(newStory.content, newStory.params.voice).then(async (audioData) => {
             if (audioData) {
+              // Update state for immediate playback availability
               setStoryHistory(prev => prev.map(s => 
                 (s.timestamp === newStory.timestamp) ? { ...s, audio_data: audioData } : s
               ));
               
-              if (currentStory && currentStory.timestamp === newStory.timestamp) {
-                setCurrentStory(prev => prev ? { ...prev, audio_data: audioData } : null);
-              }
+              // Update the current open modal if it's the same story
+              setCurrentStory(prev => (prev && prev.timestamp === newStory.timestamp) ? { ...prev, audio_data: audioData } : prev);
 
+              // Update audio in DB if user is logged in
               if (user) {
-                // Wait for Phase 2 to get the ID if needed
-                const checkInterval = setInterval(async () => {
-                  if (savedId) {
-                    await updateStoryAudio(savedId, audioData);
-                    clearInterval(checkInterval);
+                // Poll for the ID if Phase 2 is slow
+                const pollInterval = setInterval(async () => {
+                  if (savedStoryId) {
+                    await updateStoryAudio(savedStoryId, audioData);
+                    clearInterval(pollInterval);
                   }
                 }, 1000);
-                setTimeout(() => clearInterval(checkInterval), 10000);
+                setTimeout(() => clearInterval(pollInterval), 15000);
               }
             }
-          }).catch(err => console.error("Background Audio Error:", err));
+          }).catch(err => console.error("Audio generation failed:", err));
         }
       });
     } catch (err: any) {
@@ -279,27 +226,9 @@ function App() {
     }
   };
 
-  const getRemainingGenerations = () => user ? Math.max(0, TIERS[user.tier].limit - user.generationsUsed) : Math.max(0, 1 - guestUsage);
-
   const handleLogout = async () => {
     await signOut();
-    setUser(null);
-    setIsInteractive(false);
-    setSelectedVoice(VoiceOption.KORE);
-    localStorage.removeItem('auth_user_profile');
-    localStorage.removeItem('story_history_cache');
-    loadLocalHistory();
-  };
-
-  const handleUpdateProfile = (newName: string) => {
-    if (user) setUser({ ...user, displayName: newName });
-  };
-
-  const handleSelectStoryFromProfile = (story: GeneratedStory) => {
-    setCurrentStory(story);
-    setShowProfileModal(false);
-    setAppState(AppState.SUCCESS);
-    setIsStreaming(false);
+    handleLogoutCleanup();
   };
 
   return (
@@ -318,29 +247,28 @@ function App() {
         
         <div className="flex items-center gap-2 md:gap-4">
           <div className="px-3 py-1 rounded-full bg-white/5 border border-white/10 text-[10px] md:text-xs text-indigo-200">
-             {timeToNextUnlock ? (<span>Новая через: <span className="font-bold text-pink-300">{timeToNextUnlock}</span></span>) : (<span>Осталось сказок: <span className="font-bold text-white">{getRemainingGenerations()}</span></span>)}
+             Осталось сказок: <span className="font-bold text-white">{getRemainingGenerations()}</span>
           </div>
           
           <div className="flex items-center gap-2 md:gap-3 flex-nowrap min-w-[120px] justify-end">
-            {!isAuthInit ? (
-              user ? (
-                <>
-                  <button 
-                    onClick={() => setShowProfileModal(true)}
-                    className="flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-500/10 border border-indigo-500/30 hover:bg-indigo-500/20 transition-all text-sm font-semibold text-indigo-100 whitespace-nowrap"
-                  >
-                    <div className="w-5 h-5 rounded-full bg-indigo-500 flex items-center justify-center text-[10px] font-bold text-white">
-                      {(user.displayName || '?').charAt(0).toUpperCase()}
-                    </div>
-                    <span className="hidden sm:inline">Мой профиль</span>
-                  </button>
-                  <Button variant="secondary" onClick={handleLogout} className="px-4 py-2 text-sm shadow-none whitespace-nowrap">Выйти</Button>
-                </>
-              ) : (
-                <Button variant="primary" onClick={() => setShowAuthModal(true)} className="px-4 py-2 text-sm shadow-none whitespace-nowrap">Войти</Button>
-              )
+            {/* Show user buttons if we have cached user, otherwise wait for init */}
+            {user ? (
+              <>
+                <button 
+                  onClick={() => setShowProfileModal(true)}
+                  className="flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-500/10 border border-indigo-500/30 hover:bg-indigo-500/20 transition-all text-sm font-semibold text-indigo-100 whitespace-nowrap"
+                >
+                  <div className="w-5 h-5 rounded-full bg-indigo-500 flex items-center justify-center text-[10px] font-bold text-white">
+                    {(user.displayName || '?').charAt(0).toUpperCase()}
+                  </div>
+                  <span className="hidden sm:inline">Мой профиль</span>
+                </button>
+                <Button variant="secondary" onClick={handleLogout} className="px-4 py-2 text-sm shadow-none whitespace-nowrap">Выйти</Button>
+              </>
+            ) : !isAuthInit ? (
+              <Button variant="primary" onClick={() => setShowAuthModal(true)} className="px-4 py-2 text-sm shadow-none whitespace-nowrap">Войти</Button>
             ) : (
-              <div className="w-10 h-10 border-2 border-white/10 border-t-white/50 rounded-full animate-spin"></div>
+              <div className="w-8 h-8 border-2 border-white/10 border-t-indigo-400 rounded-full animate-spin"></div>
             )}
           </div>
         </div>
@@ -384,6 +312,7 @@ function App() {
             </div>
           </GlassCard>
 
+          {/* Library shows stories from cache instantly */}
           {storyHistory.length > 0 && (
             <div className="mt-12 animate-fade-in delay-200">
               <h3 className="text-xl font-semibold mb-4 text-indigo-200 pl-2 flex items-center gap-2">
@@ -438,8 +367,8 @@ function App() {
           onClose={() => setShowProfileModal(false)}
           user={user}
           stories={storyHistory}
-          onUpdateProfile={handleUpdateProfile}
-          onSelectStory={handleSelectStoryFromProfile}
+          onUpdateProfile={(n) => setUser({ ...user, displayName: n })}
+          onSelectStory={(s) => { setCurrentStory(s); setShowProfileModal(false); setAppState(AppState.SUCCESS); }}
         />
       )}
     </div>
