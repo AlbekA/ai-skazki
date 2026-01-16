@@ -114,6 +114,19 @@ export const saveStory = async (userId: string, story: GeneratedStory, audioData
 };
 
 /**
+ * Updates an existing story with audio data
+ */
+export const updateStoryAudio = async (storyId: string, audioData: string) => {
+  if (!supabase) return;
+  const { error } = await supabase
+    .from('stories')
+    .update({ audio_data: audioData })
+    .eq('id', storyId);
+  
+  if (error) console.error("Error updating audio:", error);
+};
+
+/**
  * Fetches user stories, filtering out expired ones
  */
 export const getStories = async (userId: string): Promise<GeneratedStory[]> => {

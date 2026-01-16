@@ -11,7 +11,7 @@ import {
 } from './types';
 import { SCENARIO_OPTIONS, TIERS, VOICE_OPTIONS } from './constants';
 import { generateStoryStream, generateStoryAudio } from './services/geminiService';
-import { checkUsageLimit, getSupabase, getUserProfile, signOut, saveStory, getStories } from './services/supabaseService';
+import { checkUsageLimit, getSupabase, getUserProfile, signOut, saveStory, getStories, updateStoryAudio } from './services/supabaseService';
 import { Button, GlassCard, Input, ScenarioSelector, Spinner, Toggle, VoiceSelector } from './components/UIComponents';
 import StoryModal from './components/StoryModal';
 import AuthModal from './components/AuthModal';
@@ -30,14 +30,11 @@ function App() {
   const [storyHistory, setStoryHistory] = useState<GeneratedStory[]>([]);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   
-  // 1. Instant optimistic user from localStorage
   const [user, setUser] = useState<UserProfile | null>(() => {
     try {
       const saved = localStorage.getItem('auth_user_profile');
       return saved ? JSON.parse(saved) : null;
-    } catch {
-      return null;
-    }
+    } catch { return null; }
   });
 
   const [guestUsage, setGuestUsage] = useState(0);
@@ -49,7 +46,6 @@ function App() {
   
   const hasLoadedHistory = useRef(false);
 
-  // Sync user profile to storage
   useEffect(() => {
     if (user) {
       localStorage.setItem('auth_user_profile', JSON.stringify(user));
@@ -58,22 +54,18 @@ function App() {
     }
   }, [user]);
 
-  // Auth Initialization
   useEffect(() => {
     const savedGuest = localStorage.getItem('guest_usage');
     if (savedGuest) setGuestUsage(parseInt(savedGuest, 10));
 
     const supabase = getSupabase();
     if (supabase) {
-      // Check session once on mount
       supabase.auth.getSession().then(async ({ data: { session } }) => {
         if (session?.user) {
           const profile = await getUserProfile(session.user);
           setUser(profile);
           await migrateAndLoadStories(profile);
         } else {
-          // DO NOT setUser(null) here to avoid flickering optimistic state
-          // Only if we don't have an optimistic user at all, load local history
           if (!localStorage.getItem('auth_user_profile')) {
             loadLocalHistory();
           }
@@ -81,7 +73,6 @@ function App() {
         setIsAuthInit(false);
       });
       
-      // Listen for global auth events
       const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
         if (session?.user) {
           const profile = await getUserProfile(session.user);
@@ -133,7 +124,6 @@ function App() {
     hasLoadedHistory.current = true;
   };
 
-  // Immediate update after login in Modal
   const handleAuthSuccess = async (supabaseUser: any) => {
     setErrorMsg(null);
     const profile = await getUserProfile(supabaseUser);
@@ -214,22 +204,49 @@ function App() {
 
         if (isComplete) {
           setIsStreaming(false);
+          
+          // Phase 1: Immediate save text and update history
+          let savedId: string | undefined = undefined;
+          
           if (user) {
-            const audioData = await generateStoryAudio(newStory.content, newStory.params.voice);
-            const savedDbStory = await saveStory(user.id, newStory, audioData);
+            const savedDbStory = await saveStory(user.id, newStory);
             if (savedDbStory) {
-              const storyWithId = { ...newStory, id: savedDbStory.id, audio_data: audioData };
+              savedId = savedDbStory.id;
+              const storyWithId = { ...newStory, id: savedId };
               setCurrentStory(storyWithId);
               setStoryHistory(prev => [storyWithId, ...prev]);
+              
+              // Refresh profile for generation count
+              getUserProfile({ id: user.id } as any).then(p => setUser(p));
             }
-            const updatedProfile = await getUserProfile({ id: user.id } as any);
-            setUser(updatedProfile);
           } else {
-            setStoryHistory(prev => [newStory, ...prev].slice(0, 2));
+            setStoryHistory(prev => {
+              const updated = [newStory, ...prev].slice(0, 2);
+              localStorage.setItem('story_history', JSON.stringify(updated));
+              return updated;
+            });
             const newUsage = guestUsage + 1;
             setGuestUsage(newUsage);
             localStorage.setItem('guest_usage', newUsage.toString());
           }
+
+          // Phase 2: Background Audio Generation
+          generateStoryAudio(newStory.content, newStory.params.voice).then(async (audioData) => {
+            if (audioData) {
+              // Update local state history
+              setStoryHistory(prev => prev.map(s => 
+                (s.timestamp === newStory.timestamp) ? { ...s, audio_data: audioData } : s
+              ));
+              
+              // Update current view if it's the same story
+              setCurrentStory(prev => prev && prev.timestamp === newStory.timestamp ? { ...prev, audio_data: audioData } : prev);
+
+              // Update Database if logged in
+              if (user && savedId) {
+                await updateStoryAudio(savedId, audioData);
+              }
+            }
+          }).catch(err => console.error("Background Audio Error:", err));
         }
       });
     } catch (err: any) {
@@ -349,7 +366,7 @@ function App() {
               </h3>
               <div className="grid gap-4 md:grid-cols-2">
                 {storyHistory.slice(0, 4).map((hist, idx) => (
-                  <GlassCard key={hist.id || idx} className="hover:bg-white/15 transition-all cursor-pointer group hover:scale-[1.01]" onClick={() => { setCurrentStory(hist); setAppState(AppState.SUCCESS); setIsStreaming(false); }}>
+                  <GlassCard key={hist.id || hist.timestamp || idx} className="hover:bg-white/15 transition-all cursor-pointer group hover:scale-[1.01]" onClick={() => { setCurrentStory(hist); setAppState(AppState.SUCCESS); setIsStreaming(false); }}>
                     <div className="flex justify-between items-start mb-2">
                       <span className="text-2xl">{SCENARIO_OPTIONS.find(o => o.value === hist.params.scenario)?.icon || '✨'}</span>
                       <span className="text-[10px] text-indigo-300 font-bold uppercase tracking-wider">{new Date(hist.timestamp).toLocaleDateString()}</span>
@@ -357,10 +374,14 @@ function App() {
                     <h4 className="font-bold text-lg mb-2 group-hover:text-purple-300 transition-colors line-clamp-1">{hist.title}</h4>
                     <p className="text-sm text-gray-400 line-clamp-2">{hist.content}</p>
                     <div className="mt-3 flex items-center justify-between">
-                       {hist.audio_data && (
+                       {hist.audio_data ? (
                         <div className="flex items-center gap-1 text-[10px] text-indigo-400 font-bold uppercase tracking-wider">
-                           <div className="w-1.5 h-1.5 bg-indigo-400 rounded-full animate-pulse" /> Аудио
+                           <div className="w-1.5 h-1.5 bg-indigo-400 rounded-full animate-pulse" /> Аудио готово
                         </div>
+                       ) : (
+                         <div className="flex items-center gap-1 text-[10px] text-pink-400/70 font-bold uppercase tracking-wider animate-pulse">
+                           <div className="w-1.5 h-1.5 bg-pink-400 rounded-full" /> Магия голоса...
+                         </div>
                        )}
                        <span className="text-[10px] text-indigo-200/50 group-hover:text-indigo-200 font-bold uppercase">Читать →</span>
                     </div>
