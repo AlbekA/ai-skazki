@@ -76,12 +76,21 @@ const StoryModal: React.FC<StoryModalProps> = ({
     };
   }, []);
 
-  // When story changes, reset local audio state
+  // Синхронизация: если аудио пришло из родительского компонента (App.tsx) в фоне
+  useEffect(() => {
+    if (story?.audio_data && isLoadingAudio && !audioBufferRef.current) {
+      // Если пользователь нажал Play и ждал, а данные пришли в фоне - запускаем
+      handleToggleAudio(); 
+    }
+  }, [story?.audio_data]);
+
+  // Сброс состояния при смене сказки
   useEffect(() => {
     if (story?.timestamp !== lastProcessedStoryRef.current) {
       stopAudio();
       audioBufferRef.current = null;
       lastProcessedStoryRef.current = story?.timestamp || null;
+      setIsLoadingAudio(false);
     }
   }, [story?.timestamp]);
 
@@ -97,7 +106,6 @@ const StoryModal: React.FC<StoryModalProps> = ({
 
   const isAudioDisabled = () => {
     if (isStreaming || !story) return true;
-    // Guest limit: can only listen to fresh stories (within 1 min of generation if no audio_data)
     if (userTier === UserTier.GUEST && !story.audio_data && !audioBufferRef.current) {
       const isHistory = (Date.now() - story.timestamp > 60000);
       if (isHistory) return true;
@@ -122,25 +130,26 @@ const StoryModal: React.FC<StoryModalProps> = ({
         await audioContextRef.current.resume();
       }
 
-      // 1. Check if we already have the decoded buffer
+      // 1. Используем уже готовый буфер
       if (audioBufferRef.current) {
         playBuffer(audioBufferRef.current);
         setIsLoadingAudio(false);
         return;
       }
 
-      // 2. Check for base64 in story object
+      // 2. Используем base64 из объекта сказки
       let base64Audio = story?.audio_data;
       
-      // 3. Generate if totally missing
-      if (!base64Audio && story) {
+      // 3. Если данных нет вообще (фоновая генерация еще не успела)
+      if (!base64Audio && story && !isStreaming) {
         try {
+          // Пытаемся запустить принудительно, если кнопка нажата
           base64Audio = await generateStoryAudio(story.content, story.params.voice);
           if (onAudioLoaded && base64Audio) {
             onAudioLoaded(base64Audio);
           }
         } catch (err) {
-          console.error("Manual TTS generation failed:", err);
+          console.error("TTS generation failed:", err);
         }
       }
 
@@ -149,9 +158,6 @@ const StoryModal: React.FC<StoryModalProps> = ({
         const buffer = await decodeAudioData(byteArray, audioContextRef.current, 24000, 1);
         audioBufferRef.current = buffer;
         playBuffer(buffer);
-      } else {
-        // Still nothing? Background generation might be working.
-        // Wait a bit or show error.
       }
 
     } catch (error) {
@@ -238,7 +244,7 @@ const StoryModal: React.FC<StoryModalProps> = ({
              <div className="flex items-center gap-2 w-full sm:w-auto bg-white/5 rounded-xl p-1 pr-3">
                <button
                  onClick={handleToggleAudio}
-                 disabled={isLoadingAudio || isAudioDisabled()}
+                 disabled={isLoadingAudio || isStreaming || isAudioDisabled()}
                  className={`w-10 h-10 flex items-center justify-center rounded-lg transition-all disabled:opacity-30 disabled:cursor-not-allowed
                    ${isPlaying ? 'bg-indigo-500 text-white' : 'bg-indigo-500/20 text-indigo-200 hover:bg-indigo-500/40 hover:text-white'}
                  `}
@@ -270,9 +276,9 @@ const StoryModal: React.FC<StoryModalProps> = ({
                
                <div className="flex flex-col">
                   <span className="text-[10px] uppercase font-bold text-indigo-300/70 tracking-wider">
-                    {isStreaming ? 'Создаем...' : (isAudioDisabled() ? 'Недоступно' : (isPlaying ? 'Играет' : 'Сказка голосом'))}
+                    {isStreaming ? 'Создаем...' : (isLoadingAudio ? 'Подготовка...' : (isPlaying ? 'Играет' : 'Сказка голосом'))}
                   </span>
-                  {!isAudioReady && !isStreaming && !isAudioDisabled() && (
+                  {!isAudioReady && !isStreaming && !isLoadingAudio && !isAudioDisabled() && (
                     <span className="text-[9px] text-pink-400 animate-pulse font-bold uppercase leading-none">Голос готовится...</span>
                   )}
                </div>

@@ -121,7 +121,6 @@ function App() {
   const isPremiumUnlocked = () => user?.tier === UserTier.STORYTELLER || user?.tier === UserTier.WIZARD;
   const getRemainingGenerations = () => user ? Math.max(0, TIERS[user.tier].limit - user.generationsUsed) : Math.max(0, 1 - guestUsage);
 
-  // Helper to update audio across all relevant state pieces
   const handleAudioGenerated = (audioData: string, timestamp: number, storyId?: string) => {
     setStoryHistory(prev => prev.map(s => 
       s.timestamp === timestamp ? { ...s, audio_data: audioData, id: storyId || s.id } : s
@@ -166,7 +165,6 @@ function App() {
       const startTime = Date.now();
 
       await generateStoryStream(request, async ({ title, content, isComplete }) => {
-        // Continuous update for smooth streaming
         const updatedStory: GeneratedStory = {
           title: title || "Сочиняем заголовок...",
           content: content || "Начинаем рассказ...",
@@ -184,42 +182,46 @@ function App() {
         if (isComplete) {
           setIsStreaming(false);
           
-          // Use the absolute final text for persistence and audio
           const finalStory: GeneratedStory = {
             ...updatedStory,
             title: title || updatedStory.title,
             content: content || updatedStory.content
           };
 
-          // 1. Local history update
+          // 1. Update UI instantly
           setStoryHistory(prev => [finalStory, ...prev]);
 
-          // 2. Background persistence
-          let savedStoryId: string | undefined;
-          if (user) {
-            saveStory(user.id, finalStory).then(async (dbResponse) => {
-              if (dbResponse) {
-                savedStoryId = dbResponse.id;
-                setStoryHistory(prev => prev.map(s => s.timestamp === startTime ? { ...s, id: savedStoryId } : s));
-                getUserProfile({ id: user.id } as any).then(p => setUser(p));
-              }
-            });
-          } else {
-            const nextUsage = guestUsage + 1;
-            setGuestUsage(nextUsage);
-            localStorage.setItem('guest_usage', nextUsage.toString());
-          }
+          // 2. Parallel Background Processing: Save to DB and Generate Audio
+          const savePromise = user ? saveStory(user.id, finalStory) : Promise.resolve(null);
+          const audioPromise = finalStory.content.length > 10 
+            ? generateStoryAudio(finalStory.content, finalStory.params.voice)
+            : Promise.resolve(null);
 
-          // 3. Background audio generation (only start if we have real content)
-          if (finalStory.content && finalStory.content.length > 20) {
-            generateStoryAudio(finalStory.content, finalStory.params.voice)
-              .then(audioData => {
-                if (audioData) {
-                  handleAudioGenerated(audioData, startTime, savedStoryId);
-                }
-              })
-              .catch(err => console.error("Background TTS failed:", err));
-          }
+          Promise.all([savePromise, audioPromise]).then(async ([dbResponse, audioData]) => {
+            const savedId = dbResponse?.id;
+            
+            // If we have audio, update UI immediately
+            if (audioData) {
+              handleAudioGenerated(audioData, startTime, savedId);
+              
+              // If we have both ID and Audio, ensure DB is in sync
+              if (savedId && user) {
+                await updateStoryAudio(savedId, audioData);
+              }
+            } else if (savedId) {
+              // Just update the ID if no audio yet
+              setStoryHistory(prev => prev.map(s => s.timestamp === startTime ? { ...s, id: savedId } : s));
+            }
+
+            // Refresh profile if generation count changed
+            if (user) {
+              getUserProfile({ id: user.id } as any).then(p => setUser(p));
+            } else {
+              const nextUsage = guestUsage + 1;
+              setGuestUsage(nextUsage);
+              localStorage.setItem('guest_usage', nextUsage.toString());
+            }
+          }).catch(err => console.error("Parallel processing error:", err));
         }
       });
     } catch (err: any) {
