@@ -9,7 +9,7 @@ interface StoryModalProps {
   isOpen: boolean;
   onClose: () => void;
   onNewStory: () => void;
-  onAudioLoaded?: (audioData: string) => void; // New callback
+  onAudioLoaded?: (audioData: string) => void;
   isStreaming?: boolean;
   userTier?: UserTier;
 }
@@ -59,7 +59,7 @@ const StoryModal: React.FC<StoryModalProps> = ({
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioSourceRef = useRef<AudioBufferSourceNode | null>(null);
   const audioBufferRef = useRef<AudioBuffer | null>(null);
-  const lastLoadedAudioRef = useRef<string | null>(null);
+  const lastProcessedStoryRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (isStreaming && contentEndRef.current) {
@@ -76,13 +76,14 @@ const StoryModal: React.FC<StoryModalProps> = ({
     };
   }, []);
 
+  // When story changes, reset local audio state
   useEffect(() => {
-    if (!isOpen) {
+    if (story?.timestamp !== lastProcessedStoryRef.current) {
       stopAudio();
       audioBufferRef.current = null;
-      lastLoadedAudioRef.current = null;
+      lastProcessedStoryRef.current = story?.timestamp || null;
     }
-  }, [isOpen, story?.timestamp]);
+  }, [story?.timestamp]);
 
   const stopAudio = () => {
     if (audioSourceRef.current) {
@@ -96,8 +97,9 @@ const StoryModal: React.FC<StoryModalProps> = ({
 
   const isAudioDisabled = () => {
     if (isStreaming || !story) return true;
+    // Guest limit: can only listen to fresh stories (within 1 min of generation if no audio_data)
     if (userTier === UserTier.GUEST && !story.audio_data && !audioBufferRef.current) {
-      const isHistory = (Date.now() - story.timestamp > 15000);
+      const isHistory = (Date.now() - story.timestamp > 60000);
       if (isHistory) return true;
     }
     return false;
@@ -120,22 +122,25 @@ const StoryModal: React.FC<StoryModalProps> = ({
         await audioContextRef.current.resume();
       }
 
-      // 1. If we already have a decoded buffer in memory, use it
+      // 1. Check if we already have the decoded buffer
       if (audioBufferRef.current) {
         playBuffer(audioBufferRef.current);
         setIsLoadingAudio(false);
         return;
       }
 
-      // 2. If we have base64 in the story object but no buffer yet
+      // 2. Check for base64 in story object
       let base64Audio = story?.audio_data;
       
-      // 3. If no audio data anywhere, generate it
+      // 3. Generate if totally missing
       if (!base64Audio && story) {
-        base64Audio = await generateStoryAudio(story.content, story.params.voice);
-        // Save back to parent so it's not generated again for this story
-        if (onAudioLoaded && base64Audio) {
-          onAudioLoaded(base64Audio);
+        try {
+          base64Audio = await generateStoryAudio(story.content, story.params.voice);
+          if (onAudioLoaded && base64Audio) {
+            onAudioLoaded(base64Audio);
+          }
+        } catch (err) {
+          console.error("Manual TTS generation failed:", err);
         }
       }
 
@@ -144,10 +149,13 @@ const StoryModal: React.FC<StoryModalProps> = ({
         const buffer = await decodeAudioData(byteArray, audioContextRef.current, 24000, 1);
         audioBufferRef.current = buffer;
         playBuffer(buffer);
+      } else {
+        // Still nothing? Background generation might be working.
+        // Wait a bit or show error.
       }
 
     } catch (error) {
-      console.error("Audio playback failed:", error);
+      console.error("Audio playback error:", error);
     } finally {
       setIsLoadingAudio(false);
     }
@@ -164,17 +172,19 @@ const StoryModal: React.FC<StoryModalProps> = ({
         if (onAudioLoaded && base64Audio) onAudioLoaded(base64Audio);
       }
       
-      const blob = new Blob([decode(base64Audio!)], { type: 'audio/pcm' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${story.title}.pcm`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+      if (base64Audio) {
+        const blob = new Blob([decode(base64Audio)], { type: 'audio/pcm' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${story.title || 'audio'}.pcm`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }
     } catch (e) {
-      alert("Ошибка при скачивании");
+      console.error("Download failed:", e);
     } finally {
       setIsLoadingAudio(false);
     }
@@ -193,6 +203,8 @@ const StoryModal: React.FC<StoryModalProps> = ({
   };
 
   if (!isOpen || !story) return null;
+
+  const isAudioReady = !!(story.audio_data || audioBufferRef.current);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
@@ -227,12 +239,16 @@ const StoryModal: React.FC<StoryModalProps> = ({
                <button
                  onClick={handleToggleAudio}
                  disabled={isLoadingAudio || isAudioDisabled()}
-                 className="w-10 h-10 flex items-center justify-center rounded-lg bg-indigo-500/20 text-indigo-200 hover:bg-indigo-500/40 hover:text-white transition-all disabled:opacity-30 disabled:cursor-not-allowed"
+                 className={`w-10 h-10 flex items-center justify-center rounded-lg transition-all disabled:opacity-30 disabled:cursor-not-allowed
+                   ${isPlaying ? 'bg-indigo-500 text-white' : 'bg-indigo-500/20 text-indigo-200 hover:bg-indigo-500/40 hover:text-white'}
+                 `}
                >
                  {isLoadingAudio ? (
                    <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
                  ) : isPlaying ? (
-                   <div className="w-3 h-3 bg-indigo-200 rounded-sm"></div>
+                   <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
+                     <path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/>
+                   </svg>
                  ) : (
                    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
@@ -240,7 +256,7 @@ const StoryModal: React.FC<StoryModalProps> = ({
                  )}
                </button>
                
-               {userTier === UserTier.WIZARD && !isStreaming && (
+               {userTier === UserTier.WIZARD && !isStreaming && isAudioReady && (
                  <button 
                   onClick={handleDownloadAudio}
                   className="w-10 h-10 flex items-center justify-center rounded-lg bg-purple-500/20 text-purple-200 hover:bg-purple-500/40 hover:text-white transition-all"
@@ -252,9 +268,14 @@ const StoryModal: React.FC<StoryModalProps> = ({
                  </button>
                )}
                
-               <span className="text-xs font-medium text-indigo-200 hidden sm:inline">
-                 {isStreaming ? 'Магия...' : (isAudioDisabled() ? 'Озвучка недоступна' : (isPlaying ? 'Играет' : 'Слушать'))}
-               </span>
+               <div className="flex flex-col">
+                  <span className="text-[10px] uppercase font-bold text-indigo-300/70 tracking-wider">
+                    {isStreaming ? 'Создаем...' : (isAudioDisabled() ? 'Недоступно' : (isPlaying ? 'Играет' : 'Сказка голосом'))}
+                  </span>
+                  {!isAudioReady && !isStreaming && !isAudioDisabled() && (
+                    <span className="text-[9px] text-pink-400 animate-pulse font-bold uppercase leading-none">Голос готовится...</span>
+                  )}
+               </div>
              </div>
 
             <div className="flex gap-3 w-full sm:w-auto">

@@ -29,7 +29,6 @@ function App() {
   const [currentStory, setCurrentStory] = useState<GeneratedStory | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   
-  // 1. Instant User Load from Cache
   const [user, setUser] = useState<UserProfile | null>(() => {
     try {
       const saved = localStorage.getItem('auth_user_profile');
@@ -37,7 +36,6 @@ function App() {
     } catch { return null; }
   });
 
-  // 2. Instant History Load from Cache
   const [storyHistory, setStoryHistory] = useState<GeneratedStory[]>(() => {
     try {
       const saved = localStorage.getItem('story_history_cache');
@@ -53,12 +51,10 @@ function App() {
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [isAuthInit, setIsAuthInit] = useState(true);
-  const [timeToNextUnlock, setTimeToNextUnlock] = useState<string | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
   
   const hasLoadedHistory = useRef(false);
 
-  // Sync state to cache
   useEffect(() => {
     if (user) localStorage.setItem('auth_user_profile', JSON.stringify(user));
     else localStorage.removeItem('auth_user_profile');
@@ -68,11 +64,9 @@ function App() {
     localStorage.setItem('story_history_cache', JSON.stringify(storyHistory));
   }, [storyHistory]);
 
-  // Reliable Auth Initialization
   useEffect(() => {
     const supabase = getSupabase();
     if (supabase) {
-      // Check current session immediately
       supabase.auth.getSession().then(async ({ data: { session } }) => {
         if (session?.user) {
           const profile = await getUserProfile(session.user);
@@ -82,7 +76,6 @@ function App() {
         setIsAuthInit(false);
       });
       
-      // Listen for changes
       const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
         if (session?.user) {
           const profile = await getUserProfile(session.user);
@@ -117,7 +110,6 @@ function App() {
   };
 
   const handleAuthSuccess = async (supabaseUser: any) => {
-    // Immediate feedback on login
     setIsAuthInit(true);
     const profile = await getUserProfile(supabaseUser);
     setUser(profile);
@@ -129,20 +121,21 @@ function App() {
   const isPremiumUnlocked = () => user?.tier === UserTier.STORYTELLER || user?.tier === UserTier.WIZARD;
   const getRemainingGenerations = () => user ? Math.max(0, TIERS[user.tier].limit - user.generationsUsed) : Math.max(0, 1 - guestUsage);
 
-  const handleAudioGenerated = (audioData: string) => {
-    if (!currentStory) return;
-    
-    // Update local history
+  // Helper to update audio across all relevant state pieces
+  const handleAudioGenerated = (audioData: string, timestamp: number, storyId?: string) => {
     setStoryHistory(prev => prev.map(s => 
-      s.timestamp === currentStory.timestamp ? { ...s, audio_data: audioData } : s
+      s.timestamp === timestamp ? { ...s, audio_data: audioData, id: storyId || s.id } : s
     ));
     
-    // Update current story object
-    setCurrentStory(prev => prev ? { ...prev, audio_data: audioData } : null);
+    setCurrentStory(prev => {
+      if (prev && prev.timestamp === timestamp) {
+        return { ...prev, audio_data: audioData, id: storyId || prev.id };
+      }
+      return prev;
+    });
 
-    // Save to DB if available
-    if (user && currentStory.id) {
-      updateStoryAudio(currentStory.id, audioData);
+    if (user && storyId) {
+      updateStoryAudio(storyId, audioData);
     }
   };
 
@@ -170,15 +163,18 @@ function App() {
 
     try {
       let firstChunkReceived = false;
+      const startTime = Date.now();
+
       await generateStoryStream(request, async ({ title, content, isComplete }) => {
-        const newStory: GeneratedStory = {
+        // Continuous update for smooth streaming
+        const updatedStory: GeneratedStory = {
           title: title || "Сочиняем заголовок...",
           content: content || "Начинаем рассказ...",
-          timestamp: Date.now(),
+          timestamp: startTime,
           params: request
         };
         
-        setCurrentStory(newStory);
+        setCurrentStory(updatedStory);
 
         if (!firstChunkReceived && (title || content)) {
           firstChunkReceived = true;
@@ -188,19 +184,23 @@ function App() {
         if (isComplete) {
           setIsStreaming(false);
           
-          // PHASE 1: Add to local history instantly
-          setStoryHistory(prev => [newStory, ...prev]);
+          // Use the absolute final text for persistence and audio
+          const finalStory: GeneratedStory = {
+            ...updatedStory,
+            title: title || updatedStory.title,
+            content: content || updatedStory.content
+          };
 
-          // PHASE 2: Background Save
+          // 1. Local history update
+          setStoryHistory(prev => [finalStory, ...prev]);
+
+          // 2. Background persistence
           let savedStoryId: string | undefined;
-          
           if (user) {
-            saveStory(user.id, newStory).then(async (dbResponse) => {
+            saveStory(user.id, finalStory).then(async (dbResponse) => {
               if (dbResponse) {
                 savedStoryId = dbResponse.id;
-                // Tag the local story with its DB ID
-                setStoryHistory(prev => prev.map(s => s.timestamp === newStory.timestamp ? { ...s, id: savedStoryId } : s));
-                // Update profile usage count
+                setStoryHistory(prev => prev.map(s => s.timestamp === startTime ? { ...s, id: savedStoryId } : s));
                 getUserProfile({ id: user.id } as any).then(p => setUser(p));
               }
             });
@@ -210,29 +210,16 @@ function App() {
             localStorage.setItem('guest_usage', nextUsage.toString());
           }
 
-          // PHASE 3: Background Audio Generation
-          generateStoryAudio(newStory.content, newStory.params.voice).then(async (audioData) => {
-            if (audioData) {
-              // Update state for immediate playback availability
-              setStoryHistory(prev => prev.map(s => 
-                (s.timestamp === newStory.timestamp) ? { ...s, audio_data: audioData } : s
-              ));
-              
-              // Update the current open modal if it's the same story
-              setCurrentStory(prev => (prev && prev.timestamp === newStory.timestamp) ? { ...prev, audio_data: audioData } : prev);
-
-              // Update audio in DB if user is logged in
-              if (user) {
-                const pollInterval = setInterval(async () => {
-                  if (savedStoryId) {
-                    await updateStoryAudio(savedStoryId, audioData);
-                    clearInterval(pollInterval);
-                  }
-                }, 1000);
-                setTimeout(() => clearInterval(pollInterval), 15000);
-              }
-            }
-          }).catch(err => console.error("Audio generation failed:", err));
+          // 3. Background audio generation (only start if we have real content)
+          if (finalStory.content && finalStory.content.length > 20) {
+            generateStoryAudio(finalStory.content, finalStory.params.voice)
+              .then(audioData => {
+                if (audioData) {
+                  handleAudioGenerated(audioData, startTime, savedStoryId);
+                }
+              })
+              .catch(err => console.error("Background TTS failed:", err));
+          }
         }
       });
     } catch (err: any) {
@@ -369,7 +356,7 @@ function App() {
         isOpen={appState === AppState.SUCCESS && !!currentStory} 
         onClose={() => setAppState(AppState.IDLE)}
         isStreaming={isStreaming}
-        onAudioLoaded={handleAudioGenerated}
+        onAudioLoaded={(data) => currentStory && handleAudioGenerated(data, currentStory.timestamp, currentStory.id)}
         userTier={user?.tier}
         onNewStory={() => { setAppState(AppState.IDLE); window.scrollTo({ top: 0, behavior: 'smooth' }); }}
       />
